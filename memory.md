@@ -1,6 +1,6 @@
 # PokeBells Session Memory
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 Workspace: `Z:\PokeBells`
 
 ## Current Goal
@@ -12,8 +12,9 @@ Build PokeBells so the game/runtime can live in inscriptions, captured Pokemon c
 **Hybrid architecture: game-as-inscription + GH Pages companion for wallet ops + sign-in identity.**
 
 - **Inscription** (`nintondo.io/bells/inscriptions/<game-id>`) hosts the game itself: ROM chunks pulled from on-chain inscriptions, binjgb emulator, capture detection, capture JSON generation. **Read-only** wrt wallet — receives `?wallet=<addr>&sig=<sig>` URL params, verifies signature locally, loads owned Pokemon from chain. Zero IP hosted on a domain we own.
-- **GH Pages companion** (`<owner>.github.io/pokebells` or custom domain) is **wallet-only**: sign-in via `signMessage`, generates the verified game URL for the player, and acts as the mint surface for capture JSONs (paste JSON → builds PSBT → signs → broadcasts). No ROM, no emulator, no Pokemon sprites — just a wallet utility specialized for PokeBells JSON inscriptions. Legal exposure minimized.
-- **Two clipboard handoffs per session**: (1) copy signature from companion sign-in into inscription URL/state; (2) copy capture JSON from inscription, paste into companion mint UI. No way around this — wallet is in extension origin, isolated from inscription iframe.
+- **Companion site** (must be on a **custom non-PSL domain** — see Public Suffix List finding below) is **wallet-only**: sign-in via `signMessage`, generates the verified game URL for the player, and acts as the mint surface for capture JSONs (paste JSON → builds PSBT → signs → broadcasts). No ROM, no emulator, no Pokemon sprites — just a wallet utility specialized for PokeBells JSON inscriptions. Legal exposure minimized.
+- **Two clipboard handoffs per session**: (1) sign-in on companion produces a verified game URL containing `?wallet=<addr>&sig=<sig>&issued=<ts>&expires=<ts>&nonce=<n>` — user opens this URL to play; (2) at mint time, copy capture JSON from inscription, paste into companion mint UI which forwards to Nintondo Inscriber for signing. No way around this — wallet is in extension origin, isolated from inscription iframe.
+- **Sign-in challenge format** (canonical, used by `companion/index.html`): `pokebells:signin:v1:<inscription_id>:<addr>:<issued_ms>:<expires_ms>:<nonce>`. 24h TTL. Inscription must parse params, recompute the challenge, verify the signature recovers `<addr>`, check `now < expires`, then trust.
 
 **Why this is the floor**: Nintondo dev confirmed (2026-04-18 Telegram) they will not ship a wallet bridge for inscriptions because of drainer risk. So no wallet inside `content.nintondo.io` ever. Hybrid is the only path that combines on-chain canonical game + working wallet + minimum legal exposure.
 
@@ -79,16 +80,50 @@ Using `phase1/mainnet-canary/localhost-probe.html`:
 
 Root cause: Firefox MV3 has an undocumented behavior that prevents content-script injection on localhost/127.0.0.1 even with `<all_urls>` matches and permission granted. No user-side workaround found.
 
-### Cross-domain HTTPS confirmed working
-- `https://wikipedia.org` → `typeof window.nintondo === "object"` CONFIRMED by console test
-- Extension injects on any HTTPS domain except the specific `content.nintondo.io` exclusion and localhost
-- GitHub Pages URL will receive injection
+### Public Suffix List (PSL) domains are blocked (finding 2026-04-19)
+Empirical test results (Firefox + Chrome, both with Nintondo Wallet enabled, all other wallets disabled):
+
+| URL | `typeof window.nintondo` |
+|---|---|
+| `https://wikipedia.org` | `"object"` ✅ |
+| `https://docs.github.com` | `"object"` ✅ |
+| `https://octocat.github.io/` (HTTPS) | `"undefined"` ❌ |
+| `https://ceyz.github.io/pokebells/` | `"undefined"` ❌ |
+| `https://pokebells.pages.dev` | `"undefined"` ❌ |
+
+**Pattern**: extension injects on regular registered domains, NOT on Public Suffix List subdomains. Free static hosts (github.io, pages.dev, vercel.app, netlify.app, workers.dev, fly.dev, replit.app, glitch.me, etc.) are all on the PSL because they isolate user-served subdomains as separate origins. The Nintondo extension (or the browser MV3 layer interacting with it) doesn't run content-scripts on PSL subdomains — we couldn't find the exclusion in the extension source, so the cause is likely browser-level handling of PSL.
+
+**Workaround**: the companion site must be deployed on a **custom non-PSL domain**. Cost: $1–15/year (Cloudflare Registrar at-cost, Porkbun cheap). Domain can be generic (no Pokemon branding) to keep legal exposure minimal. Can still use GitHub Pages or Cloudflare Pages as the host — just point a custom domain at it.
 
 ### Net conclusions (reusable)
-1. **Inscription URL cannot host wallet-dependent code** until/unless Nintondo ships a bridge.
-2. **Localhost dev cannot host wallet-dependent code** under Firefox MV3 (as of 2026-04-18).
-3. **Any non-localhost HTTPS domain works** for wallet injection.
-4. Dev loop: mock adapter locally (`wallet-adapter.mjs` mock mode); real wallet only testable on a deployed HTTPS URL.
+1. **Inscription URL cannot host wallet-dependent code** until/unless Nintondo ships a bridge (refused by dev 2026-04-18).
+2. **Localhost dev cannot host wallet-dependent code** under Firefox MV3 (as of 2026-04-19).
+3. **PSL subdomains (github.io, pages.dev, vercel.app, etc.) cannot host wallet-dependent code** — must use a custom registered domain.
+4. **Custom HTTPS domain works** for wallet injection (`wikipedia.org`, `docs.github.com`, etc. confirmed; any registered domain expected to work).
+5. Dev loop: mock adapter locally (`wallet-adapter.mjs` mock mode); real wallet only testable on a deployed custom-domain HTTPS URL.
+
+### Inscription iframe sandbox capabilities (probe results 2026-04-18)
+Tool: `phase1/mainnet-canary/sandbox-capabilities-probe.html`. Inscribed on testnet, opened via `bells-testnet-content.nintondo.io`. Verified what survives the `<iframe sandbox="allow-scripts">` restriction:
+
+| Capability | Result | Notes |
+|---|---|---|
+| `navigator.clipboard.writeText` | ✅ PASS | requires user gesture (button click). The mint flow's "Copy capture JSON" button works. |
+| `document.execCommand('copy')` | ✅ PASS | deprecated fallback, also works. |
+| `fetch` | ✅ PASS | needed for block hash + inscription content fetches. |
+| `Blob` + `URL.createObjectURL` | ✅ PASS | available but … |
+| `<a download>` file save | ❌ FAIL | sandbox blocks downloads (no `allow-downloads`). |
+| `localStorage` | ❌ FAIL | opaque origin throws SecurityError. |
+| `indexedDB` | API exists, real ops UNTESTED | probe v2 added real put/get tests but user couldn't scroll to click them in the iframe. Critical to retest — ROM chunk cache depends on it. |
+| `caches` (Cache API) | API exists, real ops UNTESTED | same as IDB — fallback if IDB fails. |
+| `window.open` | ❌ FAIL | sandbox blocks popups (no `allow-popups`). |
+| `<a target="_blank">` click | ❌ FAIL | same. |
+| `form submit target="_blank"` | ❌ FAIL | same. |
+| `postMessage` to parent | ✅ PASS | one-way only — viewer doesn't reply (no bridge). |
+| `window.nintondo` | ❌ FAIL | as expected, content-script blocked. |
+
+**Implication for the design**: the inscription-side mint flow MUST use clipboard + manual tab switch by the user. Cannot auto-open the companion or download a file. UX: inscription shows "Copy capture JSON" → user clicks → user opens companion bookmark → paste → sign.
+
+**Open question**: real IDB ops in sandbox. Inscription scroll bug prevented testing. Either fix the probe to put new buttons at top OR use a less tall layout for the next iteration. If IDB fails, persistence is impossible inside the inscription, which kills "save state across sessions" — falls back to "address-derived state, no local persistence".
 
 ### Nintondo team contact
 Bridge request message drafted 2026-04-18. Proposes postMessage EIP-1193-style proxy from viewer to iframe. Security properties requested: per-inscription-id consent, no silent approval, origin check, rate limit.
@@ -118,15 +153,36 @@ Bridge request message drafted 2026-04-18. Proposes postMessage EIP-1193-style p
 - Only the capture event is proven (not the full playthrough). Each proof references a checkpoint state hash from the prior capture or game start, forming a chain.
 - Indexer is open-source — anyone can run their own and verify the "official" set independently. Decentralized validation, no central authority.
 
+## Repo & Deployment State
+
+- GitHub repo: `Ceyz/pokebells` (public, created 2026-04-18). Initial commit `5cbf3eb`, fix commit `9427f6d` (provider timing).
+- Tracked: `companion/`, `.github/workflows/pages.yml`, `memory.md`, `pokebells_roadmap_v41 (1).html`, `.gitignore`.
+- NOT tracked (deliberately): `phase1/` (game shell code), `pokemon_red.gb` (ROM — gitignored), `phase1/chunks/` (encoded ROM — gitignored), `phase1/.https-cert/` (private key — gitignored), `phase1/tmp-*/` (extension reverse-eng — gitignored).
+- GH Pages live at `https://ceyz.github.io/pokebells/` but **wallet doesn't inject** (PSL block, see findings).
+- Cloudflare Pages live at `https://pokebells.pages.dev/` but **same PSL issue**.
+- **BLOCKER**: needs custom non-PSL domain to be testable end-to-end with a real wallet. Once domain is configured, both GH Pages and CF Pages can host — just point the custom domain at one of them.
+
 ## Remaining Work
 
-- **Phase 3 priority**: schema + block hash + attestation in `capture-core.mjs` and `wallet-adapter.mjs`. Real `window.nintondo` wired in once shell is on HTTPS.
-- GitHub Pages deploy (`.github/workflows/pages.yml`, static export of `phase1/`)
-- Phase 6 POC: pick zkVM (SP1 vs RISC Zero benchmark on a single capture circuit), measure real proof time/size on binjgb
-- Continue remaining phases from `pokebells_roadmap_v41 (1).html`
+- **CRITICAL UNBLOCKER**: acquire and configure a custom non-PSL domain for the companion (any registrar, ~$1–15/year, generic name). Without it, no end-to-end wallet test is possible.
+- **Phase 3 priority** (parallel-safe — doesn't need wallet): schema + block hash + attestation in `capture-core.mjs` and `wallet-adapter.mjs`. Already-passing tests (15/15) are the regression baseline.
+- **Inscription side wiring** (deferred until domain ready): companion sign-in produces `?wallet=<addr>&sig=<sig>&issued=<ts>&expires=<ts>&nonce=<n>` URL params; the inscription must parse, verify the signature against the challenge format `pokebells:signin:v1:<inscription_id>:<addr>:<issued>:<expires>:<nonce>`, then load owned `p:pokebells` inscriptions from `api.nintondo.io` for that address.
+- **IDB/Cache real test inside the sandbox**: re-do probe with buttons at top so they're reachable when the viewer iframe doesn't scroll.
+- Phase 6 POC: pick zkVM (SP1 vs RISC Zero benchmark on a single capture circuit), measure real proof time/size on binjgb.
+- Continue remaining phases from `pokebells_roadmap_v41 (1).html`.
+
+## Files Created This Session (2026-04-18 → 2026-04-19)
+
+- `companion/index.html` — sign-in + mint companion (single file, no build step). Working, blocked only by PSL hosting.
+- `.github/workflows/pages.yml` — GH Pages deploy workflow (functional but blocked by PSL).
+- `.gitignore` — protects against committing IP/secrets.
+- `phase1/mainnet-canary/localhost-probe.html` — tests window.nintondo injection on localhost.
+- `phase1/mainnet-canary/sandbox-capabilities-probe.html` — tests clipboard/IDB/Cache/popup APIs in inscription sandbox.
+- `phase1/mainnet-canary/serve-https.py` — local HTTPS server for testing self-signed cert behavior.
+- `phase1/.https-cert/cert.pem`, `key.pem` — self-signed cert for `127.0.0.1` and `localhost` (gitignored).
 
 ## Temporary Research Artifacts
 
 - `phase1/tmp-nintondo-wallet-0.3.10/` + `.xpi` / `.zip` (unpacked Firefox extension)
 - `phase1/tmp-nintondo-viewer-bundles/`
-- `phase1/.https-cert/` (self-signed cert for HTTPS dev — should be gitignored)
+- `phase1/.https-cert/` (self-signed cert for HTTPS dev — gitignored)

@@ -611,9 +611,13 @@ const PHASES=[
     {id:'p2-9',l:'Anti-cheat $D730 : vérifier les flags des 4 Membres + Champion individuellement (pas juste le byte global) — détecter save state édité via snapshot cohérence flags vs progression Pokédex',p:'haute'},
   ]},
   {id:3,color:'#378ADD',title:'PHASE 3 — WALLET & MINT NFT',duration:'2 semaines',network:'testnet',notes:[
+    {t:'dang',x:"<strong>Architecture confirmée 2026-04-18, raffinée 2026-04-19</strong> : window.nintondo n'est PAS injecté dans l'iframe content.nintondo.io (gate explicite + sandbox iframe). Localhost également bloqué par Firefox MV3. Donc le shell de mint vit sur un domaine HTTPS séparé et l'inscription produit juste un JSON que le joueur copie/colle dans l'Inscriber via la companion. Voir memory.md."},
+    {t:'dang',x:"<strong>PSL gotcha (finding 2026-04-19)</strong> : *.github.io, *.pages.dev, *.vercel.app, *.netlify.app et tous les hôtes statiques gratuits sont sur la Public Suffix List — l'extension Nintondo ne s'y injecte PAS (test empirique Firefox+Chrome). Donc la companion DOIT être sur un domaine custom enregistré (~$1–15/an, n'importe quel registrar, nom générique). Domaine peut pointer sur GH Pages ou CF Pages — l'hébergement marche, c'est juste le sous-domaine PSL qui bloque l'extension."},
     {t:'warn',x:"Vérifier CORS de ord.nintondo.io depuis l'iframe avant tout — c'est bloquant. L'API Electrs documentée (api.nintondo.io, 13 endpoints blocs/tx) ne couvre PAS les inscriptions. ord.nintondo.io est un indexeur séparé Ordinals (502 observé). Fallback: scanner les blocs via api.nintondo.io + parser les OP_RETURN p:pokebells."},
+    {t:'info',x:"<strong>Companion site state 2026-04-19</strong> : code shipé sur Ceyz/pokebells (GH repo public, commits 5cbf3eb + 9427f6d). Déployé sur ceyz.github.io/pokebells/ ET pokebells.pages.dev — les deux fonctionnent côté hosting mais l'extension n'injecte pas (PSL). En attente du domaine custom pour test réel."},
     {t:'info',x:"WalletAdapter avec mock dès le début — découple le dev de la stabilité de l'API Nintondo. <strong>SDK :</strong> SDK officiel : npm i nintondo-sdk → initNintondo(). Méthodes : connect('bellsMainnet'), getBalance(), getPublicKey(), signPsbt(), multiPsbtSign(), calculateFee(), createTx(), getNetwork(), disconnect(). Events : accountsChanged. ⚠️ PAS de getInscriptions() — getOwnedPokemon() via ord.nintondo.io ou fallback Electrs."},
   ],tasks:[
+    {id:'p3-0',l:"<strong>UNBLOCKER</strong> — acquérir et configurer un domaine custom non-PSL pour la companion (Cloudflare Registrar / Porkbun, ~$1–15/an, nom générique non-Pokémon). Pointer le domaine sur GH Pages OU CF Pages. Sans ça, aucun test wallet end-to-end n'est possible (PSL block confirmé 2026-04-19).",p:'BLOQUANT'},
     {id:'p3-1',l:'Vérifier CORS de ord.nintondo.io depuis iframe inscrite',p:'BLOQUANT'},
     {id:'p3-2',l:'WalletAdapter : interface commune mock + nintondo-sdk réel',p:'BLOQUANT'},
     {id:'p3-3',l:"connectWallet() + détection absence extension + mode dégradé (jeu sans wallet)",p:'haute'},
@@ -751,6 +755,7 @@ const JSON_SCHEMA_V11=`{
 
 const RISKS=[
   {r:'CSP bloque wasm-unsafe-eval dans l\'iframe',i:'BLOQUANT',c:'danger',m:'Tester Phase 0 en priorité. Fallback JS pur — benchmarker avant de valider.'},
+  {r:'PSL subdomains (github.io, pages.dev, etc.) bloqués pour injection wallet',i:'BLOQUANT',c:'danger',m:'<strong>Confirmé 2026-04-19</strong> : extension Nintondo ne s\'injecte pas sur PSL. Mitigation : domaine custom enregistré (~$1–15/an), pointe sur GH/CF Pages. Soft-blocker pour go-live, pas pour le dev en local avec mock.'},
   {r:'window.nintondo non injecté dans l\'iframe (wallet v0.3.10)',i:'BLOQUANT',c:'danger',m:'Test inscription HTML minimale Phase 0. SDK officiel documenté : npm i nintondo-sdk → initNintondo(). Si window.nintondo non injecté dans iframe : fallback postMessage.'},
   {r:'binjgb n\'expose pas readByte/writeByte',i:'BLOQUANT',c:'danger',m:'Patcher le source C de binjgb — Phase 1.4.'},
   {r:'@cat-protocol/cat-sdk incompatible BellsChain',i:'Moyen (Phase 8)',c:'warning',m:'SDK conçu pour Fractal Bitcoin (chain Scrypt différente de BellsChain). Fork ou réécriture nécessaire. <strong>OP_CAT activé Bells mainnet 2025-12-25</strong> donc le prérequis chain est levé, reste juste le port du SDK.'},
