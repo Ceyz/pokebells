@@ -158,21 +158,42 @@
   let connectedAddress = null;
   let connectedNetwork = null;
 
-  const refreshProvider = async () => {
-    if (typeof window.nintondo === "undefined") {
-      setProviderStatus("err", "Nintondo wallet not installed");
-      log("window.nintondo is undefined — install the Nintondo Wallet extension and refresh");
-      $("connect-btn").disabled = true;
-      return false;
-    }
+  let providerReady = false;
+  const onProviderReady = async () => {
+    if (providerReady) return;
+    providerReady = true;
     setProviderStatus("ok", "ready");
+    $("connect-btn").disabled = false;
     try {
       const v = await window.nintondo.getVersion();
       log(`provider ready, wallet version ${JSON.stringify(v)}`);
     } catch (e) {
-      log(`provider exists but getVersion failed: ${e.message}`);
+      log(`provider ready but getVersion failed: ${e.message}`);
     }
-    return true;
+  };
+
+  const checkProviderNow = () => {
+    if (typeof window.nintondo !== "undefined") {
+      onProviderReady();
+      return true;
+    }
+    return false;
+  };
+
+  const refreshProvider = () => {
+    setProviderStatus("warn", "waiting for wallet injection...");
+    $("connect-btn").disabled = true;
+    if (checkProviderNow()) return;
+    window.addEventListener("nintondo#initialized", checkProviderNow, { once: true });
+    [100, 300, 700, 1500, 3000].forEach((delay) => {
+      setTimeout(checkProviderNow, delay);
+    });
+    setTimeout(() => {
+      if (!providerReady) {
+        setProviderStatus("err", "Nintondo wallet not detected");
+        log("after 3s, window.nintondo is still undefined — verify the Nintondo Wallet extension is enabled in this browser");
+      }
+    }, 3500);
   };
 
   const refreshConnection = async () => {
@@ -318,10 +339,9 @@
     log(`Inscriber opened in new tab — paste the JSON there and sign with your wallet to mint`);
   });
 
-  refreshProvider().then(() => {
-    const lastAddr = localStorage.getItem(STORAGE_KEY_LAST_ADDR);
-    if (lastAddr) log(`last connected wallet: ${lastAddr} (click Connect to resume)`);
-  });
+  refreshProvider();
+  const lastAddr = localStorage.getItem(STORAGE_KEY_LAST_ADDR);
+  if (lastAddr) log(`last connected wallet: ${lastAddr} (click Connect to resume)`);
 })();
 </script>
 
