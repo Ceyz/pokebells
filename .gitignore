@@ -1,0 +1,42 @@
+# Game ROM and IP-derived assets — NEVER commit
+pokemon_red.gb
+*.gb
+*.gbc
+*.sav
+shin_patch.zip
+*.bps
+*.ips
+
+# ROM chunks generated for inscriptions (encoded ROM)
+phase1/chunks/
+
+# Reverse-engineering artifacts (Nintondo extension/viewer bundles)
+phase1/tmp-*
+
+# Local TLS dev certs (private keys!)
+phase1/.https-cert/
+*.pem
+*.key
+
+# Local Claude config
+.claude/
+
+# Dev/build artifacts
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local environment overrides
+.env
+.env.local
