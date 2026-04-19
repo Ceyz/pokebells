@@ -1,0 +1,54 @@
+name: Deploy PartyKit to Cloudflare
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Optional custom host, e.g. party.bellforge.app"
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - "phase1/partykit-probe/**"
+      - ".github/workflows/partykit-cloudflare.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: partykit-cloudflare
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: phase1/partykit-probe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: phase1/partykit-probe/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check server syntax
+        run: npm run check
+
+      - name: Deploy to Cloudflare via PartyKit
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PARTYKIT_DOMAIN: ${{ github.event.inputs.domain || secrets.PARTYKIT_DOMAIN }}
+        run: |
+          if [ -z "$PARTYKIT_DOMAIN" ]; then
+            echo "Set the PARTYKIT_DOMAIN secret or provide the workflow_dispatch domain input."
+            exit 1
+          fi
+          npx partykit deploy --domain "$PARTYKIT_DOMAIN"

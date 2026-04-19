@@ -26,13 +26,20 @@ memory.md
 pokebells_roadmap*.html
 
 # Local research / prototype work not meant for the public companion repo
-phase1/
+phase1/*
 poc/
 download.py
 patch-rom.py
 poc-memory.html
 test-nintondo.html
-.github/workflows/partykit-cloudflare.yml
+
+# Phase 4.5 relay — transparent transport layer, safe to publish
+# (no ROM, no IP, pure WebSocket relay + signature verification)
+!phase1/partykit-probe/
+phase1/partykit-probe/node_modules/
+phase1/partykit-probe/.partykit/
+!phase1/signin-verify.mjs
+!.github/workflows/partykit-cloudflare.yml
 
 # Dev/build artifacts
 node_modules/

@@ -7,40 +7,97 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>
   :root {
-    --bg: #f5f5f5; --fg: #111; --muted: #555; --accent: #378ADD;
-    --ok: #0a7a25; --err: #a71d1d; --warn: #b86b00;
-    --card: #fff; --border: #ddd;
+    --bg: #f5f5f5;
+    --fg: #111;
+    --muted: #555;
+    --accent: #378add;
+    --ok: #0a7a25;
+    --err: #a71d1d;
+    --warn: #b86b00;
+    --card: #fff;
+    --border: #ddd;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
-         font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; max-width: 760px;
-         margin-left: auto; margin-right: auto; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+    max-width: 760px;
+    margin-left: auto;
+    margin-right: auto;
+  }
   h1 { font-size: 22px; margin: 0 0 4px; }
   h2 { font-size: 16px; margin: 0 0 12px; color: var(--accent); }
   p.lead { color: var(--muted); margin: 0 0 28px; }
-  section { background: var(--card); border: 1px solid var(--border);
-            border-radius: 8px; padding: 20px; margin-bottom: 18px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-         margin: 10px 0; }
-  button { font: inherit; padding: 8px 14px; border: 1px solid var(--accent);
-           background: var(--accent); color: #fff; border-radius: 6px; cursor: pointer; }
-  button.secondary { background: #fff; color: var(--accent); }
-  button:disabled { background: #ccc; border-color: #ccc; color: #777; cursor: not-allowed; }
-  input[type=text], textarea {
-    font: 13px/1.4 ui-monospace, Consolas, monospace; padding: 8px;
-    border: 1px solid var(--border); border-radius: 6px; width: 100%;
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 18px;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin: 10px 0;
+  }
+  button {
+    font: inherit;
+    padding: 8px 14px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: #fff;
+    color: var(--accent);
+  }
+  button:disabled {
+    background: #ccc;
+    border-color: #ccc;
+    color: #777;
+    cursor: not-allowed;
+  }
+  input[type=text], textarea, select {
+    font: 13px/1.4 ui-monospace, Consolas, monospace;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    width: 100%;
+    background: #fff;
+    color: var(--fg);
   }
   textarea { min-height: 160px; resize: vertical; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
-          font-size: 11px; font-weight: 600; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+  }
   .pill.ok { background: #e0f5e6; color: var(--ok); }
   .pill.err { background: #fce4e4; color: var(--err); }
   .pill.warn { background: #fff3dd; color: var(--warn); }
   .muted { color: var(--muted); }
   .small { font-size: 12px; }
-  pre { white-space: pre-wrap; word-break: break-word; background: #f9f9f9;
-        padding: 10px; border: 1px solid var(--border); border-radius: 6px;
-        margin: 8px 0; font-size: 12px; max-height: 240px; overflow: auto; }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #f9f9f9;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 8px 0;
+    font-size: 12px;
+    max-height: 240px;
+    overflow: auto;
+  }
   .hidden { display: none !important; }
   hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
   label { display: block; font-weight: 600; margin: 12px 0 4px; }
@@ -52,8 +109,8 @@
 <header>
   <h1>PokeBells Companion</h1>
   <p class="lead">
-    Sign in with your Bells wallet, get your verified game link, and mint your captured Pokémon.
-    The game itself runs from the on-chain inscription — this site only handles wallet operations.
+    Sign in with your Bells wallet, get your verified game link, and mint your captured Pokemon.
+    The game runs from the on-chain inscription. This companion handles wallet actions and pre-mint validation.
   </p>
 </header>
 
@@ -65,7 +122,7 @@
   </div>
   <div class="row">
     <span>Network:</span>
-    <span id="network-status" class="muted">—</span>
+    <span id="network-status" class="muted">--</span>
   </div>
   <div class="row">
     <span>Address:</span>
@@ -74,46 +131,49 @@
 </section>
 
 <section id="signin-section">
-  <h2>1 · Sign in &amp; get your game link</h2>
+  <h2>1 · Sign in and get your game link</h2>
   <p class="muted small">
-    The game inscription verifies your wallet ownership cryptographically. Sign a one-time
-    challenge here; the resulting signature is appended to the game URL and proves to the
-    inscription that you own the wallet (without needing wallet access inside the iframe).
+    The game inscription verifies wallet ownership cryptographically. Sign a one-time challenge here.
+    The resulting signature is appended to the game URL so the inscription can trust the wallet without
+    needing direct wallet access inside the inscription runtime.
   </p>
 
   <label for="inscription-id">Game inscription ID</label>
   <div class="field-hint">
-    The on-chain inscription ID of the PokeBells game. Stored locally so you don't have to retype it.
+    The on-chain inscription ID of the PokeBells game. Stored locally so you do not need to retype it.
   </div>
+  <label for="game-network">Game network</label>
+  <select id="game-network">
+    <option value="bellsMainnet">Bells mainnet</option>
+    <option value="bellsTestnet">Bells testnet</option>
+  </select>
   <input type="text" id="inscription-id"
          placeholder="e.g. 58bf94bfb7214a783656e792dc39490e2a70dd59e9c9221c923f0e4300407681i0">
 
   <div class="row">
     <button id="connect-btn">Connect wallet</button>
-    <button id="signin-btn" class="secondary" disabled>Sign in &amp; build game link</button>
+    <button id="signin-btn" class="secondary" disabled>Sign in and build game link</button>
   </div>
 
   <div id="game-link-block" class="hidden">
     <hr>
-    <label>Your verified game link</label>
-    <div class="field-hint">Bookmark this. Open it whenever you want to play. The signature is valid for 24 h.</div>
-    <input type="text" id="game-link" readonly>
+    <label>Your durable game link</label>
+    <div class="field-hint">Recommended for playing. Opens the same inscription top-level on the content host, where IndexedDB/Cache API can persist local SRAM and ROM cache.</div>
+    <input type="text" id="direct-game-link" readonly>
     <div class="row">
-      <button id="copy-link-btn" class="secondary">Copy link</button>
-      <a id="open-game-link" href="#" target="_blank" rel="noopener">
-        <button>Open game in new tab</button>
+      <button id="copy-direct-link-btn" class="secondary">Copy game link</button>
+      <a id="open-direct-game-link" href="#" target="_blank" rel="noopener">
+        <button type="button">Open game</button>
       </a>
     </div>
   </div>
 </section>
 
 <section id="mint-section">
-  <h2>2 · Mint a captured Pokémon</h2>
+  <h2>2 · Mint a captured Pokemon</h2>
   <p class="muted small">
-    Inside the game, click <strong>Copy capture JSON</strong> after a successful catch.
-    Paste it below — this page validates the schema then opens the Nintondo Inscriber with
-    the JSON ready to inscribe. The inscription becomes an NFT owned by your wallet and
-    will appear in your collection on the next sign-in.
+    Paste the capture JSON from the game below. This companion now verifies the basic schema plus the
+    anti-cheat provenance fields before it opens the Nintondo Inscriber.
   </p>
 
   <label for="capture-json">Capture JSON from the game</label>
@@ -137,10 +197,28 @@
 (() => {
   const STORAGE_KEY_INSCRIPTION = "pokebells.inscription_id";
   const STORAGE_KEY_LAST_ADDR = "pokebells.last_address";
-  const VIEWER_BASE = "https://nintondo.io/bells/inscriptions/";
+  const STORAGE_KEY_GAME_NETWORK = "pokebells.game_network";
+  const NETWORK_CONFIG = {
+    bellsMainnet: {
+      label: "Bells mainnet",
+      contentBase: "https://bells-mainnet-content.nintondo.io/html/",
+      connectNetwork: "bellsMainnet",
+    },
+    bellsTestnet: {
+      label: "Bells testnet",
+      contentBase: "https://bells-testnet-content.nintondo.io/html/",
+      connectNetwork: "bellsTestnet",
+    },
+  };
   const INSCRIBER_BASE = "https://nintondo.io/inscriber";
   const SIGNATURE_TTL_HOURS = 24;
-  const NETWORK = "bellsMainnet";
+  const BLOCK_HASH_RE = /^[0-9a-f]{64}$/i;
+  const WRAM_BYTE_LENGTH = 0x2000;
+  const ATTESTATION_SCHEME = "sha256:block_hash+wram+signed_wallet+session_sequence:v1";
+  const ELECTRS_BASE_URLS = {
+    "bells-mainnet": "https://api.nintondo.io",
+    "bells-testnet": "https://bells-testnet-api.nintondo.io",
+  };
 
   const $ = (id) => document.getElementById(id);
   const log = (msg) => {
@@ -156,6 +234,91 @@
     el.textContent = text;
   };
 
+  const normalizeNetworkKey = (network) => {
+    switch (String(network ?? "").trim()) {
+      case "mainnet":
+      case "bells-mainnet":
+      case "bellsMainnet":
+        return "bells-mainnet";
+      case "testnet":
+      case "bells-testnet":
+      case "bellsTestnet":
+        return "bells-testnet";
+      default:
+        return null;
+    }
+  };
+
+  const resolveElectrsBaseUrl = (network) => {
+    const normalized = normalizeNetworkKey(network);
+    return normalized ? ELECTRS_BASE_URLS[normalized] : null;
+  };
+
+  const getSelectedNetworkConfig = () =>
+    NETWORK_CONFIG[$("game-network").value] ?? NETWORK_CONFIG.bellsMainnet;
+
+  const networkParamToConfigKey = (network) => {
+    switch (String(network ?? "").trim()) {
+      case "mainnet":
+      case "bells-mainnet":
+      case "bellsMainnet":
+        return "bellsMainnet";
+      case "testnet":
+      case "bells-testnet":
+      case "bellsTestnet":
+        return "bellsTestnet";
+      default:
+        return null;
+    }
+  };
+
+  const buildSignedGameUrl = (inscriptionId, params) => {
+    const config = getSelectedNetworkConfig();
+    const query = params.toString();
+    return `${config.contentBase}${inscriptionId}?${query}`;
+  };
+
+  const encodeUtf8 = (value) => new TextEncoder().encode(String(value ?? ""));
+
+  const decodeBase64 = (value) => {
+    const binary = atob(String(value ?? ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  };
+
+  const concatBytes = (parts) => {
+    const normalized = parts.map((part) => part instanceof Uint8Array ? part : encodeUtf8(part));
+    const total = normalized.reduce((sum, part) => sum + part.byteLength, 0);
+    const combined = new Uint8Array(total);
+    let offset = 0;
+    for (const part of normalized) {
+      combined.set(part, offset);
+      offset += part.byteLength;
+    }
+    return combined;
+  };
+
+  const bytesToHex = (bytes) =>
+    Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+
+  const sha256Hex = async (parts) => {
+    const input = concatBytes(parts);
+    const digest = await crypto.subtle.digest("SHA-256", input);
+    return bytesToHex(new Uint8Array(digest));
+  };
+
+  const computeAttestation = async (parsed, ramSnapshotBytes) => {
+    return sha256Hex([
+      String(parsed.block_hash_at_capture ?? "").trim().toLowerCase(),
+      ramSnapshotBytes,
+      String(parsed.signed_in_wallet ?? ""),
+      String(parsed.session_sequence_number ?? ""),
+    ]);
+  };
+
   let connectedAddress = null;
   let connectedNetwork = null;
 
@@ -166,8 +329,8 @@
     setProviderStatus("ok", "ready");
     $("connect-btn").disabled = false;
     try {
-      const v = await window.nintondo.getVersion();
-      log(`provider ready, wallet version ${JSON.stringify(v)}`);
+      const version = await window.nintondo.getVersion();
+      log(`provider ready, wallet version ${JSON.stringify(version)}`);
     } catch (e) {
       log(`provider ready but getVersion failed: ${e.message}`);
     }
@@ -192,38 +355,70 @@
     setTimeout(() => {
       if (!providerReady) {
         setProviderStatus("err", "Nintondo wallet not detected");
-        log("after 3s, window.nintondo is still undefined — verify the Nintondo Wallet extension is enabled in this browser");
+        log("after 3s, window.nintondo is still undefined - verify that the wallet extension is enabled");
       }
     }, 3500);
   };
 
-  const refreshConnection = async () => {
+  const refreshConnection = () => {
     if (!connectedAddress) {
       $("address-status").textContent = "not connected";
       $("address-status").className = "muted";
-      $("network-status").textContent = "—";
+      $("network-status").textContent = "--";
       $("signin-btn").disabled = true;
       return;
     }
     $("address-status").textContent = connectedAddress;
     $("address-status").className = "";
-    $("network-status").textContent = connectedNetwork ?? "—";
+    $("network-status").textContent = connectedNetwork ?? "--";
     $("signin-btn").disabled = false;
     localStorage.setItem(STORAGE_KEY_LAST_ADDR, connectedAddress);
   };
 
   const persistedInscription = localStorage.getItem(STORAGE_KEY_INSCRIPTION);
-  if (persistedInscription) $("inscription-id").value = persistedInscription;
+  if (persistedInscription) {
+    $("inscription-id").value = persistedInscription;
+  }
+  const persistedNetwork = localStorage.getItem(STORAGE_KEY_GAME_NETWORK);
+  if (persistedNetwork && NETWORK_CONFIG[persistedNetwork]) {
+    $("game-network").value = persistedNetwork;
+  }
+
+  const queryParams = new URLSearchParams(window.location.search);
+  const queryInscription = (
+    queryParams.get("inscription")
+    ?? queryParams.get("inscription_id")
+    ?? queryParams.get("id")
+    ?? ""
+  ).trim();
+  if (queryInscription) {
+    $("inscription-id").value = queryInscription;
+    localStorage.setItem(STORAGE_KEY_INSCRIPTION, queryInscription);
+    log(`prefilled inscription from game shell: ${queryInscription}`);
+  }
+  const queryNetwork = networkParamToConfigKey(queryParams.get("network"));
+  if (queryNetwork) {
+    $("game-network").value = queryNetwork;
+    localStorage.setItem(STORAGE_KEY_GAME_NETWORK, queryNetwork);
+    log(`prefilled network from game shell: ${NETWORK_CONFIG[queryNetwork].label}`);
+  }
+
+  $("game-network").addEventListener("change", () => {
+    localStorage.setItem(STORAGE_KEY_GAME_NETWORK, $("game-network").value);
+    log(`game network set to ${getSelectedNetworkConfig().label}`);
+  });
   $("inscription-id").addEventListener("change", () => {
     localStorage.setItem(STORAGE_KEY_INSCRIPTION, $("inscription-id").value.trim());
   });
 
   $("connect-btn").addEventListener("click", async () => {
     try {
-      const result = await window.nintondo.connect(NETWORK);
-      connectedAddress = typeof result === "string" ? result :
-                         result?.address ?? await window.nintondo.getAccount();
-      connectedNetwork = await window.nintondo.getNetwork().catch(() => NETWORK);
+      const networkConfig = getSelectedNetworkConfig();
+      const result = await window.nintondo.connect(networkConfig.connectNetwork);
+      connectedAddress = typeof result === "string"
+        ? result
+        : result?.address ?? await window.nintondo.getAccount();
+      connectedNetwork = await window.nintondo.getNetwork().catch(() => networkConfig.connectNetwork);
       log(`connected: ${connectedAddress} on ${connectedNetwork}`);
       refreshConnection();
     } catch (e) {
@@ -241,11 +436,13 @@
       log("sign-in aborted: wallet not connected");
       return;
     }
+
     const issuedAt = Date.now();
     const expiresAt = issuedAt + SIGNATURE_TTL_HOURS * 60 * 60 * 1000;
     const nonce = crypto.getRandomValues(new Uint32Array(2)).join("");
     const challenge = `pokebells:signin:v1:${inscriptionId}:${connectedAddress}:${issuedAt}:${expiresAt}:${nonce}`;
     log(`signing challenge (${challenge.length} chars)...`);
+
     let signature;
     try {
       signature = await window.nintondo.signMessage(challenge);
@@ -253,7 +450,7 @@
       log(`signMessage failed: ${e.name ?? "Error"}: ${e.message ?? e}`);
       return;
     }
-    log(`signature obtained (${signature.length} chars)`);
+
     const params = new URLSearchParams({
       wallet: connectedAddress,
       sig: signature,
@@ -261,51 +458,118 @@
       expires: String(expiresAt),
       nonce,
     });
-    const gameUrl = `${VIEWER_BASE}${inscriptionId}?${params.toString()}`;
-    $("game-link").value = gameUrl;
-    $("open-game-link").href = gameUrl;
+    const directUrl = buildSignedGameUrl(inscriptionId, params);
+    $("direct-game-link").value = directUrl;
+    $("open-direct-game-link").href = directUrl;
     $("game-link-block").classList.remove("hidden");
-    log(`game link ready (${gameUrl.length} chars)`);
+    log(`durable game link ready (${directUrl.length} chars)`);
   });
 
-  $("copy-link-btn").addEventListener("click", async () => {
+  $("copy-direct-link-btn").addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText($("game-link").value);
-      log("game link copied to clipboard");
+      await navigator.clipboard.writeText($("direct-game-link").value);
+      log("durable direct game link copied to clipboard");
     } catch (e) {
       log(`clipboard failed: ${e.message}`);
     }
   });
 
-  const validateCaptureJson = (raw) => {
+  const validateCaptureJson = async (raw) => {
     let parsed;
     try { parsed = JSON.parse(raw); }
     catch (e) { return { ok: false, error: `invalid JSON: ${e.message}` }; }
+
     if (parsed.p !== "pokebells") return { ok: false, error: 'field "p" must equal "pokebells"' };
     if (parsed.op !== "capture") return { ok: false, error: 'field "op" must equal "capture"' };
-    if (!Number.isInteger(parsed.species_id) ||
-        parsed.species_id < 1 || parsed.species_id > 151) {
+
+    const speciesId = Number.isInteger(parsed.species_id) ? parsed.species_id : parsed.species;
+    if (!Number.isInteger(speciesId) || speciesId < 1 || speciesId > 151) {
       return { ok: false, error: "species_id must be integer in [1..151]" };
     }
-    if (!Number.isInteger(parsed.level) ||
-        parsed.level < 1 || parsed.level > 100) {
+    if (parsed.species !== undefined && parsed.species_id !== undefined && parsed.species !== parsed.species_id) {
+      return { ok: false, error: "species and species_id must match when both are present" };
+    }
+    if (!Number.isInteger(parsed.level) || parsed.level < 1 || parsed.level > 100) {
       return { ok: false, error: "level must be integer in [1..100]" };
     }
+
     const ivs = parsed.ivs ?? {};
-    for (const k of ["atk", "def", "spe", "spc"]) {
-      if (!Number.isInteger(ivs[k]) || ivs[k] < 0 || ivs[k] > 15) {
-        return { ok: false, error: `IV ${k} must be integer in [0..15]` };
+    for (const key of ["atk", "def", "spe"]) {
+      if (!Number.isInteger(ivs[key]) || ivs[key] < 0 || ivs[key] > 15) {
+        return { ok: false, error: `IV ${key} must be integer in [0..15]` };
       }
     }
-    return { ok: true, parsed };
+    const specialIv = Number.isInteger(ivs.spc) ? ivs.spc : ivs.spd;
+    if (!Number.isInteger(specialIv) || specialIv < 0 || specialIv > 15) {
+      return { ok: false, error: "IV spc/spd must be integer in [0..15]" };
+    }
+
+    if (!BLOCK_HASH_RE.test(String(parsed.block_hash_at_capture ?? "").trim())) {
+      return { ok: false, error: "block_hash_at_capture must be a 64-char hex hash" };
+    }
+    if (!Number.isInteger(parsed.session_sequence_number) || parsed.session_sequence_number < 1) {
+      return { ok: false, error: "session_sequence_number must be a positive integer" };
+    }
+    if (typeof parsed.signed_in_wallet !== "string" || !parsed.signed_in_wallet.trim()) {
+      return { ok: false, error: "signed_in_wallet must be present" };
+    }
+    if ((parsed.ram_snapshot_encoding ?? "base64") !== "base64") {
+      return { ok: false, error: 'ram_snapshot_encoding must equal "base64"' };
+    }
+    if (parsed.attestation_scheme && parsed.attestation_scheme !== ATTESTATION_SCHEME) {
+      return { ok: false, error: "attestation_scheme is not recognized" };
+    }
+    if (!BLOCK_HASH_RE.test(String(parsed.attestation ?? "").trim())) {
+      return { ok: false, error: "attestation must be a 64-char hex hash" };
+    }
+
+    let ramSnapshotBytes;
+    try {
+      ramSnapshotBytes = decodeBase64(parsed.ram_snapshot ?? "");
+    } catch (e) {
+      return { ok: false, error: `ram_snapshot is not valid base64: ${e.message}` };
+    }
+    if (ramSnapshotBytes.byteLength !== WRAM_BYTE_LENGTH) {
+      return { ok: false, error: `ram_snapshot must decode to ${WRAM_BYTE_LENGTH} bytes` };
+    }
+
+    const expectedAttestation = await computeAttestation(parsed, ramSnapshotBytes);
+    if (String(parsed.attestation).trim().toLowerCase() !== expectedAttestation) {
+      return { ok: false, error: "attestation does not match the provenance fields" };
+    }
+
+    const electrsBaseUrl = resolveElectrsBaseUrl(parsed.capture_network);
+    if (!electrsBaseUrl) {
+      return { ok: false, error: "capture_network must be bells-mainnet or bells-testnet" };
+    }
+
+    try {
+      const response = await fetch(`${electrsBaseUrl}/block/${String(parsed.block_hash_at_capture).trim().toLowerCase()}`, {
+        headers: { accept: "application/json" },
+      });
+      if (!response.ok) {
+        return { ok: false, error: `block hash lookup failed (${response.status})` };
+      }
+    } catch (e) {
+      return { ok: false, error: `block hash lookup failed: ${e.message}` };
+    }
+
+    return {
+      ok: true,
+      parsed: {
+        ...parsed,
+        species_id: speciesId,
+        iv_special: specialIv,
+      },
+    };
   };
 
   let validatedJson = null;
 
-  $("validate-btn").addEventListener("click", () => {
+  $("validate-btn").addEventListener("click", async () => {
     const raw = $("capture-json").value.trim();
-    const result = validateCaptureJson(raw);
     const out = $("validation-result");
+    const result = await validateCaptureJson(raw);
     if (!result.ok) {
       out.innerHTML = `<p><span class="pill err">INVALID</span> ${result.error}</p>`;
       $("mint-btn").disabled = true;
@@ -313,16 +577,17 @@
       log(`validation failed: ${result.error}`);
       return;
     }
-    const p = result.parsed;
+
+    const parsed = result.parsed;
     out.innerHTML =
-      `<p><span class="pill ok">VALID</span> ${p.species_name ?? "Pokémon"} ` +
-      `(species ${p.species_id}, level ${p.level}, ` +
-      `IVs ${p.ivs.atk}/${p.ivs.def}/${p.ivs.spe}/${p.ivs.spc}` +
-      `${p.shiny ? ", SHINY" : ""})</p>`;
+      `<p><span class="pill ok">VALID</span> ${parsed.species_name ?? "Pokemon"} ` +
+      `(species ${parsed.species_id}, level ${parsed.level}, ` +
+      `IVs ${parsed.ivs.atk}/${parsed.ivs.def}/${parsed.ivs.spe}/${parsed.iv_special}` +
+      `${parsed.shiny ? ", SHINY" : ""}, attested)</p>`;
     $("mint-btn").disabled = false;
     $("mint-cost").classList.remove("hidden");
     validatedJson = raw;
-    log(`validation OK: species=${p.species_id} level=${p.level}`);
+    log(`validation OK: species=${parsed.species_id} level=${parsed.level} network=${parsed.capture_network}`);
   });
 
   $("mint-btn").addEventListener("click", async () => {
@@ -332,17 +597,19 @@
     }
     try {
       await navigator.clipboard.writeText(validatedJson);
-      log("capture JSON copied to clipboard — opening Inscriber");
+      log("capture JSON copied to clipboard - opening Inscriber");
     } catch (e) {
       log(`clipboard failed (paste manually): ${e.message}`);
     }
     window.open(INSCRIBER_BASE, "_blank", "noopener");
-    log(`Inscriber opened in new tab — paste the JSON there and sign with your wallet to mint`);
+    log("Inscriber opened in new tab - paste the JSON there and sign with your wallet to mint");
   });
 
   refreshProvider();
   const lastAddr = localStorage.getItem(STORAGE_KEY_LAST_ADDR);
-  if (lastAddr) log(`last connected wallet: ${lastAddr} (click Connect to resume)`);
+  if (lastAddr) {
+    log(`last connected wallet: ${lastAddr} (click Connect to resume)`);
+  }
 })();
 </script>
 

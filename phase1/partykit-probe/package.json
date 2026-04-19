@@ -1,0 +1,13 @@
+{
+  "name": "pokebells-partykit-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "partykit dev",
+    "deploy": "partykit deploy",
+    "check": "node --check src/server.js"
+  },
+  "devDependencies": {
+    "partykit": "^0.0.115"
+  }
+}

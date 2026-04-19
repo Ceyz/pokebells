@@ -1,0 +1,8 @@
+{
+  "$schema": "https://www.partykit.io/schema.json",
+  "name": "pokebells-probe",
+  "main": "src/server.js",
+  "compatibilityDate": "2026-04-19",
+  "port": 1999,
+  "persist": ".partykit/state"
+}
