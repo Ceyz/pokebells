@@ -42,6 +42,10 @@ phase1/partykit-probe/.partykit/
 !phase1/pbrp/
 !.github/workflows/partykit-cloudflare.yml
 
+# Synthesized by pages.yml at deploy — source of truth is phase1/pbrp/
+companion/pokebells/pbrp/
+companion/pokebells/signin-verify.mjs
+
 # Dev/build artifacts
 node_modules/
 .partykit/

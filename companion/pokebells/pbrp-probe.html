@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PBRP Probe — Phase 4.5a</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #0f1216;
+    --fg: #e7ecf2;
+    --muted: #8c98a6;
+    --accent: #6aa9ff;
+    --ok: #35c46b;
+    --err: #ff5a5a;
+    --warn: #f0a846;
+    --card: #171c22;
+    --border: #242b34;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+    max-width: 1080px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; }
+  p.lead { color: var(--muted); margin: 0 0 20px; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  label { color: var(--muted); min-width: 120px; font-size: 12px; }
+  input, select, button, textarea {
+    font: inherit;
+    padding: 6px 10px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: #0b0f14;
+    color: var(--fg);
+  }
+  input[type=text] { min-width: 260px; }
+  button {
+    background: var(--accent);
+    color: #0b0f14;
+    border-color: var(--accent);
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #222;
+    color: var(--muted);
+  }
+  .pill.ok { background: rgba(53, 196, 107, 0.15); color: var(--ok); }
+  .pill.warn { background: rgba(240, 168, 70, 0.15); color: var(--warn); }
+  .pill.err { background: rgba(255, 90, 90, 0.15); color: var(--err); }
+  pre#log {
+    background: #0b0f14;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 10px;
+    max-height: 260px;
+    overflow: auto;
+    margin: 0;
+    font: 12px/1.4 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .peer {
+    border-top: 1px solid var(--border);
+    padding: 8px 0;
+    font: 12px/1.5 ui-monospace, Consolas, monospace;
+  }
+  .peer:first-child { border-top: none; }
+  .peer .addr { color: var(--accent); }
+  .peer .meta { color: var(--muted); font-size: 11px; }
+  code { background: #0b0f14; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>PBRP Probe <span class="pill" id="build-tag">v1 · 4.5a</span></h1>
+<p class="lead">
+  End-to-end canary for the PokeBells Realtime Protocol session key layer.
+  Wallet signs a session challenge, the session key signs a presence envelope,
+  the relay ships it as dumb transport, and a second tab verifies everything
+  client-side. Open in two browsers with the same room to see broadcasts.
+</p>
+
+<section>
+  <h2>Config</h2>
+  <div class="row">
+    <label for="network">Network</label>
+    <select id="network">
+      <option value="bells-mainnet">bells-mainnet</option>
+      <option value="bells-testnet" selected>bells-testnet</option>
+    </select>
+  </div>
+  <div class="row">
+    <label for="inscription-id">Inscription ID</label>
+    <input id="inscription-id" type="text" placeholder="64 hex chars + i0">
+  </div>
+  <div class="row">
+    <label for="relay-host">Relay host</label>
+    <input id="relay-host" type="text" value="party.bellforge.app">
+  </div>
+  <div class="row">
+    <label for="room">Room</label>
+    <input id="room" type="text" value="pokebells-probe-pbrp-v1">
+  </div>
+</section>
+
+<section>
+  <h2>Wallet &amp; Session</h2>
+  <div class="row">
+    <button id="connect-btn">1. Connect wallet</button>
+    <span id="wallet-pill" class="pill">disconnected</span>
+    <span id="wallet-addr" class="meta" style="color: var(--muted);"></span>
+  </div>
+  <div class="row">
+    <button id="authorize-btn" disabled>2. Authorize session (wallet signs)</button>
+    <span id="session-pill" class="pill">no session</span>
+    <span id="session-expiry" class="meta" style="color: var(--muted);"></span>
+  </div>
+  <div class="row">
+    <button id="connect-relay-btn" disabled>3. Connect relay</button>
+    <span id="relay-pill" class="pill">offline</span>
+    <span id="peer-count" class="meta" style="color: var(--muted);"></span>
+  </div>
+  <div class="row">
+    <button id="broadcast-btn" disabled>4. Broadcast signed presence</button>
+    <button id="broadcast-loop-btn" class="secondary" disabled>auto-broadcast 1 Hz</button>
+    <span id="broadcast-count" class="meta" style="color: var(--muted);"></span>
+  </div>
+</section>
+
+<section>
+  <h2>Verified peers</h2>
+  <div id="peers"><div class="meta" style="color: var(--muted);">Nothing yet. Another tab must authorize + broadcast to show up here.</div></div>
+</section>
+
+<section>
+  <h2>Event log</h2>
+  <pre id="log"></pre>
+</section>
+
+<script type="module">
+  import {
+    MAX_TTL_MS,
+    MIN_TTL_MS,
+    buildCanonicalSessionChallenge,
+    canonicalJson,
+    generateSessionKeypair,
+    importSessionPublicKeyB64url,
+    signEnvelopeBody,
+    verifyEnvelopeSignature,
+    verifySessionAuthorization,
+  } from './pbrp/session-key.mjs';
+
+  const STORAGE_KEY_INSCRIPTION = 'pokebells.inscription_id';
+  const STORAGE_KEY_NETWORK = 'pokebells.probe.network';
+  const STORAGE_KEY_RELAY = 'pokebells.probe.relay';
+  const STORAGE_KEY_ROOM = 'pokebells.probe.room';
+  const SESSION_TTL_MS = 60 * 60 * 1000;
+
+  const $ = (id) => document.getElementById(id);
+
+  const log = (msg, kind = 'info') => {
+    const ts = new Date().toISOString().slice(11, 23);
+    const line = `[${ts}] ${kind.toUpperCase().padEnd(5)} ${msg}`;
+    const logEl = $('log');
+    logEl.textContent += line + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  const setPill = (id, text, state) => {
+    const el = $(id);
+    el.textContent = text;
+    el.className = 'pill' + (state ? ' ' + state : '');
+  };
+
+  const state = {
+    wallet: null,
+    sessionPrivateKey: null,
+    sessionPublicKey: null,
+    sessionPubkeyB64url: null,
+    sessionAuth: null,
+    ws: null,
+    seq: 0,
+    broadcastLoop: null,
+    peers: new Map(),
+    broadcastCount: 0,
+  };
+
+  const queryParams = new URLSearchParams(window.location.search);
+  const stored = {
+    inscription: queryParams.get('inscription') ?? localStorage.getItem(STORAGE_KEY_INSCRIPTION) ?? '',
+    network: queryParams.get('network') ?? localStorage.getItem(STORAGE_KEY_NETWORK) ?? 'bells-testnet',
+    relay: queryParams.get('host') ?? localStorage.getItem(STORAGE_KEY_RELAY) ?? 'party.bellforge.app',
+    room: queryParams.get('room') ?? localStorage.getItem(STORAGE_KEY_ROOM) ?? 'pokebells-probe-pbrp-v1',
+  };
+  $('inscription-id').value = stored.inscription;
+  $('network').value = stored.network;
+  $('relay-host').value = stored.relay;
+  $('room').value = stored.room;
+
+  for (const [id, key] of [
+    ['inscription-id', STORAGE_KEY_INSCRIPTION],
+    ['network', STORAGE_KEY_NETWORK],
+    ['relay-host', STORAGE_KEY_RELAY],
+    ['room', STORAGE_KEY_ROOM],
+  ]) {
+    $(id).addEventListener('change', () => localStorage.setItem(key, $(id).value.trim()));
+  }
+
+  const renderPeers = () => {
+    const peersEl = $('peers');
+    if (state.peers.size === 0) {
+      peersEl.innerHTML = '<div class="meta" style="color: var(--muted);">Nothing yet.</div>';
+      return;
+    }
+    peersEl.innerHTML = '';
+    for (const [pubkey, info] of state.peers) {
+      const div = document.createElement('div');
+      div.className = 'peer';
+      const addr = document.createElement('div');
+      addr.className = 'addr';
+      addr.textContent = info.wallet;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const envelopeCount = info.envelopeCount ?? 0;
+      const lastSeen = info.lastSeenMs ? new Date(info.lastSeenMs).toISOString().slice(11, 19) : 'never';
+      const lastBody = info.lastBody ? canonicalJson(info.lastBody) : '—';
+      const sessionShort = pubkey.slice(0, 10) + '…';
+      meta.textContent = `session ${sessionShort} · ${envelopeCount} envelope(s) · last ${lastSeen} · body ${lastBody}`;
+      div.appendChild(addr);
+      div.appendChild(meta);
+      peersEl.appendChild(div);
+    }
+  };
+
+  const updatePeerCount = () => {
+    $('peer-count').textContent = state.peers.size === 0 ? '' : `· ${state.peers.size} verified peer(s)`;
+  };
+
+  const resetSessionUi = () => {
+    setPill('session-pill', 'no session', null);
+    $('session-expiry').textContent = '';
+    $('broadcast-btn').disabled = true;
+    $('broadcast-loop-btn').disabled = true;
+    $('connect-relay-btn').disabled = true;
+  };
+
+  const waitForProvider = async (timeoutMs = 3000) => {
+    if (typeof window.nintondo !== 'undefined') return;
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, timeoutMs);
+      window.addEventListener('nintondo#initialized', () => { clearTimeout(t); resolve(); }, { once: true });
+    });
+    if (typeof window.nintondo === 'undefined') {
+      throw new Error('Nintondo wallet not detected. Check extension + host is bellforge.app (PSL rule).');
+    }
+  };
+
+  $('connect-btn').addEventListener('click', async () => {
+    try {
+      await waitForProvider();
+      const network = $('network').value;
+      const result = await window.nintondo.connect(network);
+      const wallet = typeof result === 'string'
+        ? result
+        : result?.address ?? await window.nintondo.getAccount();
+      state.wallet = wallet;
+      setPill('wallet-pill', 'connected', 'ok');
+      $('wallet-addr').textContent = wallet;
+      $('authorize-btn').disabled = false;
+      log(`wallet connected: ${wallet}`);
+    } catch (err) {
+      log(`connect failed: ${err.message ?? err}`, 'err');
+      setPill('wallet-pill', 'error', 'err');
+    }
+  });
+
+  $('authorize-btn').addEventListener('click', async () => {
+    try {
+      if (!state.wallet) throw new Error('Connect wallet first.');
+      const inscriptionId = $('inscription-id').value.trim();
+      if (!/^[0-9a-f]{64}i\d+$/i.test(inscriptionId)) {
+        throw new Error('Enter a valid inscription ID (64 hex + i + index).');
+      }
+
+      const { privateKey, publicKey, publicKeyB64url } = await generateSessionKeypair();
+      state.sessionPrivateKey = privateKey;
+      state.sessionPublicKey = publicKey;
+      state.sessionPubkeyB64url = publicKeyB64url;
+
+      const issuedMs = Date.now();
+      const expiresMs = issuedMs + SESSION_TTL_MS;
+      const challenge = buildCanonicalSessionChallenge({
+        wallet: state.wallet,
+        sessionPubkey: publicKeyB64url,
+        issuedMs,
+        expiresMs,
+        inscriptionId,
+      });
+
+      log(`signing session challenge (${challenge.length} chars)`);
+      const walletSig = await window.nintondo.signMessage(challenge);
+
+      state.sessionAuth = {
+        wallet: state.wallet,
+        session_pubkey: publicKeyB64url,
+        issued: issuedMs,
+        expires: expiresMs,
+        inscription_id: inscriptionId,
+        wallet_sig: walletSig,
+      };
+
+      const ttlMin = Math.round((expiresMs - Date.now()) / 60000);
+      setPill('session-pill', `active · ${ttlMin} min left`, 'ok');
+      $('session-expiry').textContent = `expires ${new Date(expiresMs).toISOString().slice(11, 19)}`;
+      $('connect-relay-btn').disabled = false;
+      log(`session authorized (pubkey ${publicKeyB64url.slice(0, 12)}…, TTL ${ttlMin} min)`);
+    } catch (err) {
+      log(`authorize failed: ${err.message ?? err}`, 'err');
+      setPill('session-pill', 'error', 'err');
+    }
+  });
+
+  $('connect-relay-btn').addEventListener('click', () => {
+    try {
+      if (!state.sessionAuth) throw new Error('Authorize session first.');
+      const host = $('relay-host').value.trim();
+      const room = $('room').value.trim();
+      if (!host || !room) throw new Error('Relay host and room required.');
+      const url = `wss://${host}/parties/main/${encodeURIComponent(room)}`;
+      const ws = new WebSocket(url);
+      state.ws = ws;
+      setPill('relay-pill', 'connecting', 'warn');
+
+      ws.addEventListener('open', () => {
+        setPill('relay-pill', 'connected', 'ok');
+        log(`relay open: ${url}`);
+        ws.send(JSON.stringify({
+          type: 'event',
+          kind: 'pbrp_auth',
+          payload: state.sessionAuth,
+        }));
+        log('sent pbrp_auth');
+        $('broadcast-btn').disabled = false;
+        $('broadcast-loop-btn').disabled = false;
+      });
+
+      ws.addEventListener('message', (ev) => handleIncoming(ev.data));
+
+      ws.addEventListener('close', (ev) => {
+        setPill('relay-pill', `closed (${ev.code})`, 'err');
+        log(`relay closed: ${ev.code} ${ev.reason || ''}`, 'warn');
+        $('broadcast-btn').disabled = true;
+        $('broadcast-loop-btn').disabled = true;
+        if (state.broadcastLoop) {
+          clearInterval(state.broadcastLoop);
+          state.broadcastLoop = null;
+          $('broadcast-loop-btn').textContent = 'auto-broadcast 1 Hz';
+        }
+      });
+
+      ws.addEventListener('error', () => {
+        setPill('relay-pill', 'error', 'err');
+        log('relay error', 'err');
+      });
+    } catch (err) {
+      log(`connect relay failed: ${err.message ?? err}`, 'err');
+    }
+  });
+
+  const broadcastPresence = async () => {
+    try {
+      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+      if (!state.sessionPrivateKey) return;
+      state.seq += 1;
+      const now = Date.now();
+      const body = {
+        type: 'presence',
+        seq: state.seq,
+        issued: now,
+        expires: now + 5000,
+        map_id: 'probe-map',
+        x: Math.floor(Math.random() * 320),
+        y: Math.floor(Math.random() * 288),
+        label: state.wallet.slice(0, 10) + '…',
+      };
+      const sig = await signEnvelopeBody(body, state.sessionPrivateKey);
+      const envelope = { body, sig, session_pubkey: state.sessionPubkeyB64url };
+      state.ws.send(JSON.stringify({
+        type: 'event',
+        kind: 'pbrp_envelope',
+        payload: envelope,
+      }));
+      state.broadcastCount += 1;
+      $('broadcast-count').textContent = `· sent ${state.broadcastCount}`;
+      log(`→ presence seq=${body.seq} x=${body.x} y=${body.y}`);
+    } catch (err) {
+      log(`broadcast failed: ${err.message ?? err}`, 'err');
+    }
+  };
+
+  $('broadcast-btn').addEventListener('click', broadcastPresence);
+
+  $('broadcast-loop-btn').addEventListener('click', () => {
+    if (state.broadcastLoop) {
+      clearInterval(state.broadcastLoop);
+      state.broadcastLoop = null;
+      $('broadcast-loop-btn').textContent = 'auto-broadcast 1 Hz';
+      return;
+    }
+    state.broadcastLoop = setInterval(broadcastPresence, 1100);
+    broadcastPresence();
+    $('broadcast-loop-btn').textContent = 'stop auto-broadcast';
+  });
+
+  async function handleIncoming(raw) {
+    let msg;
+    try { msg = typeof raw === 'string' ? JSON.parse(raw) : null; } catch { return; }
+    if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'hello') {
+      log(`relay hello: ${msg.version}, ${msg.connectedCount} connected`);
+      return;
+    }
+    if (msg.type === 'presence') {
+      if (msg.action === 'join') log(`peer joined: ${msg.connectionId}`);
+      if (msg.action === 'leave') log(`peer left: ${msg.connectionId}`);
+      return;
+    }
+    if (msg.type === 'error') {
+      log(`relay error: ${msg.code}`, 'err');
+      return;
+    }
+    if (msg.type !== 'event') return;
+
+    if (msg.kind === 'pbrp_auth') {
+      await handleIncomingAuth(msg.payload);
+      return;
+    }
+    if (msg.kind === 'pbrp_envelope') {
+      await handleIncomingEnvelope(msg.payload);
+      return;
+    }
+  }
+
+  async function handleIncomingAuth(auth) {
+    try {
+      const network = $('network').value;
+      const verified = await verifySessionAuthorization(auth, { network });
+      state.peers.set(verified.sessionPubkeyB64url, {
+        wallet: verified.wallet,
+        inscriptionId: verified.inscriptionId,
+        expiresMs: verified.expiresMs,
+        envelopeCount: 0,
+        lastSeenMs: Date.now(),
+        lastBody: null,
+      });
+      updatePeerCount();
+      renderPeers();
+      log(`✓ peer auth verified: ${verified.wallet} (via ${verified.walletPublicKeySource})`, 'ok');
+    } catch (err) {
+      log(`✗ peer auth rejected: ${err.message ?? err}`, 'err');
+    }
+  }
+
+  async function handleIncomingEnvelope(envelope) {
+    try {
+      if (!envelope || !envelope.body || !envelope.sig || !envelope.session_pubkey) {
+        throw new Error('Envelope missing required fields.');
+      }
+      const peer = state.peers.get(envelope.session_pubkey);
+      if (!peer) {
+        log('envelope from unknown session (waiting for auth)', 'warn');
+        return;
+      }
+      if (peer.expiresMs <= Date.now()) {
+        throw new Error('Session expired.');
+      }
+      const pubKey = await importSessionPublicKeyB64url(envelope.session_pubkey);
+      const ok = await verifyEnvelopeSignature({
+        body: envelope.body,
+        sig: envelope.sig,
+        sessionPublicKey: pubKey,
+      });
+      if (!ok) throw new Error('Signature did not verify.');
+      if (typeof envelope.body?.seq === 'number' && typeof peer.lastSeq === 'number' && envelope.body.seq <= peer.lastSeq) {
+        throw new Error('Envelope seq rewound.');
+      }
+      peer.envelopeCount += 1;
+      peer.lastBody = envelope.body;
+      peer.lastSeenMs = Date.now();
+      peer.lastSeq = envelope.body?.seq ?? peer.lastSeq;
+      renderPeers();
+      log(`✓ envelope verified: ${peer.wallet.slice(0, 10)}… seq=${envelope.body.seq}`, 'ok');
+    } catch (err) {
+      log(`✗ envelope rejected: ${err.message ?? err}`, 'err');
+    }
+  }
+
+  log('probe ready');
+</script>
+
+</body>
+</html>
