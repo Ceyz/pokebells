@@ -9,7 +9,7 @@ class_name = "RelayRoom"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["RelayRoom"]
+new_sqlite_classes = ["RelayRoom"]
 
 # Uncomment after first deploy succeeds to bind the custom domain.
 # Requires the CLOUDFLARE_API_TOKEN to have Workers Scripts:Edit,
