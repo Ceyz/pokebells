@@ -179,6 +179,21 @@
   const STORAGE_KEY_ROOM = 'pokebells.probe.room';
   const SESSION_TTL_MS = 60 * 60 * 1000;
 
+  // Nintondo API uses camelCase (bellsMainnet/bellsTestnet), signin-verify
+  // uses kebab-case (bells-mainnet/bells-testnet). Normalize at boundaries.
+  const toKebabNetwork = (value) => {
+    const v = String(value ?? '').trim();
+    if (v === 'bellsMainnet' || v === 'bells-mainnet' || v === 'mainnet') return 'bells-mainnet';
+    if (v === 'bellsTestnet' || v === 'bells-testnet' || v === 'testnet') return 'bells-testnet';
+    return null;
+  };
+  const toCamelNetwork = (value) => {
+    const k = toKebabNetwork(value);
+    if (k === 'bells-mainnet') return 'bellsMainnet';
+    if (k === 'bells-testnet') return 'bellsTestnet';
+    return null;
+  };
+
   const $ = (id) => document.getElementById(id);
 
   const log = (msg, kind = 'info') => {
@@ -282,23 +297,26 @@
   $('connect-btn').addEventListener('click', async () => {
     try {
       await waitForProvider();
-      const requested = $('network').value;
-      const result = await window.nintondo.connect(requested);
+      const requestedKebab = $('network').value;
+      const requestedCamel = toCamelNetwork(requestedKebab);
+      if (!requestedCamel) throw new Error(`Unknown network selection: ${requestedKebab}`);
+      const result = await window.nintondo.connect(requestedCamel);
       const wallet = typeof result === 'string'
         ? result
         : result?.address ?? await window.nintondo.getAccount();
-      const actual = await window.nintondo.getNetwork().catch(() => requested);
+      const actualRaw = await window.nintondo.getNetwork().catch(() => requestedCamel);
+      const actualKebab = toKebabNetwork(actualRaw) ?? requestedKebab;
       state.wallet = wallet;
       setPill('wallet-pill', 'connected', 'ok');
       $('wallet-addr').textContent = wallet;
       $('authorize-btn').disabled = false;
       log(`wallet connected: ${wallet}`);
-      if (actual && actual !== requested) {
-        $('network').value = actual;
-        localStorage.setItem(STORAGE_KEY_NETWORK, actual);
-        log(`⚠ wallet is on ${actual} but probe was set to ${requested}. Synced config to ${actual}. Switch the wallet extension manually if you wanted the other network.`, 'warn');
+      if (actualKebab !== requestedKebab) {
+        $('network').value = actualKebab;
+        localStorage.setItem(STORAGE_KEY_NETWORK, actualKebab);
+        log(`⚠ wallet is on ${actualKebab} (raw: ${actualRaw}) but probe was set to ${requestedKebab}. Synced config. Switch the wallet extension manually if you wanted the other network.`, 'warn');
       } else {
-        log(`wallet network: ${actual}`);
+        log(`wallet network: ${actualKebab}`);
       }
     } catch (err) {
       log(`connect failed: ${err.message ?? err}`, 'err');
@@ -352,13 +370,28 @@
     }
   });
 
-  $('connect-relay-btn').addEventListener('click', () => {
+  $('connect-relay-btn').addEventListener('click', async () => {
     try {
       if (!state.sessionAuth) throw new Error('Authorize session first.');
       const host = $('relay-host').value.trim();
       const room = $('room').value.trim();
       if (!host || !room) throw new Error('Relay host and room required.');
+      const httpUrl = `https://${host}/parties/main/${encodeURIComponent(room)}`;
       const url = `wss://${host}/parties/main/${encodeURIComponent(room)}`;
+
+      log(`preflight ${httpUrl}`);
+      setPill('relay-pill', 'preflight…', 'warn');
+      try {
+        const resp = await fetch(httpUrl, { method: 'GET', mode: 'cors' });
+        if (!resp.ok) throw new Error(`relay health ${resp.status}`);
+        const body = await resp.json().catch(() => null);
+        log(`relay OK · ${body?.version ?? '?'} · ${body?.connectedCount ?? 0} connected`);
+      } catch (healthErr) {
+        throw new Error(
+          `relay not reachable at ${host}. Check GitHub Actions > "Deploy PartyKit to Cloudflare" finished, and DNS for ${host} resolves. Underlying: ${healthErr.message ?? healthErr}`,
+        );
+      }
+
       const ws = new WebSocket(url);
       state.ws = ws;
       setPill('relay-pill', 'connecting', 'warn');
@@ -476,7 +509,7 @@
 
   async function handleIncomingAuth(auth) {
     try {
-      const network = $('network').value;
+      const network = toKebabNetwork($('network').value) ?? 'bells-mainnet';
       const verified = await verifySessionAuthorization(auth, { network });
       state.peers.set(verified.sessionPubkeyB64url, {
         wallet: verified.wallet,
