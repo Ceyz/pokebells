@@ -39,6 +39,7 @@ test-nintondo.html
 phase1/partykit-probe/node_modules/
 phase1/partykit-probe/.partykit/
 !phase1/signin-verify.mjs
+!phase1/pbrp/
 !.github/workflows/partykit-cloudflare.yml
 
 # Dev/build artifacts

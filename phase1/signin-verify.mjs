@@ -729,7 +729,7 @@ async function discoverPublicKeyFromAddressHistory(address, services, fetchImpl)
   return null;
 }
 
-async function verifyNintondoRawSignature({ address, signature, challenge, services, fetchImpl }) {
+export async function verifyNintondoRawSignature({ address, signature, challenge, services, fetchImpl }) {
   const signatureBytes = decodeBase64Bytes(signature);
   if (signatureBytes.length !== 64) {
     throw new Error('Unsupported signature format. Expected Nintondo compact base64 output.');
