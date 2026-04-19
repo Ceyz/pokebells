@@ -1,0 +1,13 @@
+{
+  "name": "pokebells-cf-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "node --check src/worker.js && node --check src/relay-room.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0"
+  }
+}

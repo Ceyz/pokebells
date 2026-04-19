@@ -38,9 +38,12 @@ test-nintondo.html
 !phase1/partykit-probe/
 phase1/partykit-probe/node_modules/
 phase1/partykit-probe/.partykit/
+!phase1/cf-relay/
+phase1/cf-relay/node_modules/
+phase1/cf-relay/.wrangler/
 !phase1/signin-verify.mjs
 !phase1/pbrp/
-!.github/workflows/partykit-cloudflare.yml
+!.github/workflows/cf-relay.yml
 
 # Synthesized by pages.yml at deploy — source of truth is phase1/pbrp/
 companion/pokebells/pbrp/

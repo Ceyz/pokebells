@@ -1,0 +1,44 @@
+name: Deploy CF relay
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "phase1/cf-relay/**"
+      - "phase1/signin-verify.mjs"
+      - ".github/workflows/cf-relay.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-relay
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: phase1/cf-relay
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: phase1/cf-relay/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check syntax
+        run: npm run check
+
+      - name: Deploy to Cloudflare
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy
