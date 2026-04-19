@@ -21,8 +21,22 @@ phase1/.https-cert/
 # Local Claude config
 .claude/
 
+# Internal planning / private working notes
+memory.md
+pokebells_roadmap*.html
+
+# Local research / prototype work not meant for the public companion repo
+phase1/
+poc/
+download.py
+patch-rom.py
+poc-memory.html
+test-nintondo.html
+.github/workflows/partykit-cloudflare.yml
+
 # Dev/build artifacts
 node_modules/
+.partykit/
 dist/
 build/
 *.log
