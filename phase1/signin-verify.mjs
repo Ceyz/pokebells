@@ -14,7 +14,7 @@ const BELLS_MAINNET = Object.freeze({
 
 const BELLS_TESTNET = Object.freeze({
   key: 'bells-testnet',
-  bech32: 'tpep',
+  bech32: 'tbel',
   p2pkhVersion: 33,
   p2shVersion: 196,
   electrsBaseUrl: 'https://bells-testnet-api.nintondo.io',
