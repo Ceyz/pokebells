@@ -258,6 +258,11 @@
       const addr = document.createElement('div');
       addr.className = 'addr';
       addr.textContent = info.wallet;
+      const badge = document.createElement('span');
+      badge.className = 'pill ' + (info.walletVerified ? 'ok' : 'warn');
+      badge.style.marginLeft = '8px';
+      badge.textContent = info.walletVerified ? 'wallet-verified' : 'session-only';
+      addr.appendChild(badge);
       const meta = document.createElement('div');
       meta.className = 'meta';
       const envelopeCount = info.envelopeCount ?? 0;
@@ -508,8 +513,8 @@
   }
 
   async function handleIncomingAuth(auth) {
+    const network = toKebabNetwork($('network').value) ?? 'bells-mainnet';
     try {
-      const network = toKebabNetwork($('network').value) ?? 'bells-mainnet';
       const verified = await verifySessionAuthorization(auth, { network });
       state.peers.set(verified.sessionPubkeyB64url, {
         wallet: verified.wallet,
@@ -518,12 +523,44 @@
         envelopeCount: 0,
         lastSeenMs: Date.now(),
         lastBody: null,
+        walletVerified: true,
       });
       updatePeerCount();
       renderPeers();
       log(`✓ peer auth verified: ${verified.wallet} (via ${verified.walletPublicKeySource})`, 'ok');
+      return;
     } catch (err) {
-      log(`✗ peer auth rejected: ${err.message ?? err}`, 'err');
+      const msg = String(err?.message ?? err);
+      const unverifiablePubkey = /derive a public key|taproot|previously revealed/i.test(msg);
+      if (!unverifiablePubkey) {
+        log(`✗ peer auth rejected: ${msg}`, 'err');
+        return;
+      }
+      try {
+        if (!auth || typeof auth !== 'object') throw new Error('bad auth shape');
+        const sessionPubkey = String(auth.session_pubkey ?? '');
+        const wallet = String(auth.wallet ?? '');
+        const expiresMs = Number(auth.expires);
+        if (!sessionPubkey || !wallet || !Number.isSafeInteger(expiresMs)) {
+          throw new Error('bad auth fields');
+        }
+        if (Date.now() >= expiresMs) throw new Error('Session expired.');
+        await importSessionPublicKeyB64url(sessionPubkey);
+        state.peers.set(sessionPubkey, {
+          wallet,
+          inscriptionId: String(auth.inscription_id ?? ''),
+          expiresMs,
+          envelopeCount: 0,
+          lastSeenMs: Date.now(),
+          lastBody: null,
+          walletVerified: false,
+        });
+        updatePeerCount();
+        renderPeers();
+        log(`⚠ peer auth accepted without wallet verify: ${wallet}. ${msg}. Session-layer sigs will still be enforced.`, 'warn');
+      } catch (fallbackErr) {
+        log(`✗ peer auth rejected (fallback also failed): ${fallbackErr.message ?? fallbackErr}`, 'err');
+      }
     }
   }
 
