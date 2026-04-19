@@ -95,6 +95,17 @@ Empirical test results (Firefox + Chrome, both with Nintondo Wallet enabled, all
 
 **Workaround**: the companion site must be deployed on a **custom non-PSL domain**. Cost: $1–15/year (Cloudflare Registrar at-cost, Porkbun cheap). Domain can be generic (no Pokemon branding) to keep legal exposure minimal. Can still use GitHub Pages or Cloudflare Pages as the host — just point a custom domain at it.
 
+**Important nuance — CDN proxy must be OFF**: when pointing a Cloudflare-managed domain at GitHub Pages, the DNS proxy status MUST be set to "DNS only" (grey cloud), not "Proxied" (orange cloud). Proxied means traffic re-enters Cloudflare's CDN infrastructure, which empirically reproduces the PSL-style block.
+
+### Surprise blocker — missing favicon also prevents injection (finding 2026-04-19, late session)
+After acquiring `bellforge.app` and pointing it at GH Pages with custom domain (DNS-only, no proxy), the wallet still failed to inject. The fix that finally worked: **adding a `favicon.svg` file + `<link rel="icon" href="favicon.svg" type="image/svg+xml">` in the HTML head** (commit `6ea2774`). After this, `https://bellforge.app/` serves cleanly and the wallet injects.
+
+Two possible interpretations:
+1. **Browser/extension heuristic**: pages without a favicon may be treated as incomplete or error-page-like by some content-script injection paths. Empirically reproducible here.
+2. **Coincidence with redeploy**: the new commit forced a CDN cache refresh + the user's local DNS cache happened to expire at the same time. Favicon is incidental to the actual fix being a fresh deploy.
+
+Without controlled A/B testing it's hard to be certain which. **Pragmatic rule: every page hosted for wallet integration MUST include a favicon.** Cheap insurance, zero downside.
+
 ### Net conclusions (reusable)
 1. **Inscription URL cannot host wallet-dependent code** until/unless Nintondo ships a bridge (refused by dev 2026-04-18).
 2. **Localhost dev cannot host wallet-dependent code** under Firefox MV3 (as of 2026-04-19).
@@ -158,14 +169,15 @@ Bridge request message drafted 2026-04-18. Proposes postMessage EIP-1193-style p
 - GitHub repo: `Ceyz/pokebells` (public, created 2026-04-18). Initial commit `5cbf3eb`, fix commit `9427f6d` (provider timing).
 - Tracked: `companion/`, `.github/workflows/pages.yml`, `memory.md`, `pokebells_roadmap_v41 (1).html`, `.gitignore`.
 - NOT tracked (deliberately): `phase1/` (game shell code), `pokemon_red.gb` (ROM — gitignored), `phase1/chunks/` (encoded ROM — gitignored), `phase1/.https-cert/` (private key — gitignored), `phase1/tmp-*/` (extension reverse-eng — gitignored).
-- GH Pages live at `https://ceyz.github.io/pokebells/` but **wallet doesn't inject** (PSL block, see findings).
-- Cloudflare Pages live at `https://pokebells.pages.dev/` but **same PSL issue**.
-- **BLOCKER**: needs custom non-PSL domain to be testable end-to-end with a real wallet. Once domain is configured, both GH Pages and CF Pages can host — just point the custom domain at one of them.
+- GH Pages live at `https://ceyz.github.io/pokebells/` — wallet doesn't inject (PSL).
+- Cloudflare Pages live at `https://pokebells.pages.dev/` — wallet doesn't inject (PSL).
+- **Custom domain `bellforge.app` (acquired 2026-04-19, $14/yr Cloudflare Registrar) → GH Pages** with DNS-only (no CF proxy) + favicon.svg → **wallet injects, end-to-end working** (commits `6ea2774` favicon, prior `9427f6d` provider timing).
+- The CF Pages route with custom domain (`bellforge.app` proxied through CF) was tried first and failed; the GH Pages route with DNS-only succeeded after the favicon was added.
 
 ## Remaining Work
 
-- **CRITICAL UNBLOCKER**: acquire and configure a custom non-PSL domain for the companion (any registrar, ~$1–15/year, generic name). Without it, no end-to-end wallet test is possible.
-- **Phase 3 priority** (parallel-safe — doesn't need wallet): schema + block hash + attestation in `capture-core.mjs` and `wallet-adapter.mjs`. Already-passing tests (15/15) are the regression baseline.
+- ~~**CRITICAL UNBLOCKER**: acquire and configure a custom non-PSL domain~~ — **DONE 2026-04-19**: `bellforge.app` live on GH Pages + DNS-only + favicon, wallet injects.
+- **Phase 3 priority**: schema + block hash + attestation in `capture-core.mjs` and `wallet-adapter.mjs`. Already-passing tests (15/15) are the regression baseline.
 - **Inscription side wiring** (deferred until domain ready): companion sign-in produces `?wallet=<addr>&sig=<sig>&issued=<ts>&expires=<ts>&nonce=<n>` URL params; the inscription must parse, verify the signature against the challenge format `pokebells:signin:v1:<inscription_id>:<addr>:<issued>:<expires>:<nonce>`, then load owned `p:pokebells` inscriptions from `api.nintondo.io` for that address.
 - **IDB/Cache real test inside the sandbox**: re-do probe with buttons at top so they're reachable when the viewer iframe doesn't scroll.
 - Phase 6 POC: pick zkVM (SP1 vs RISC Zero benchmark on a single capture circuit), measure real proof time/size on binjgb.
