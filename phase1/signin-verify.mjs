@@ -495,6 +495,55 @@ function verifyCompactSecp256k1Signature(messageHashBytes, signatureBytes, publi
   return mod(point.x, SECP256K1_N) === r;
 }
 
+function numberToBytes32(value) {
+  const bytes = new Uint8Array(32);
+  let v = value;
+  for (let i = 31; i >= 0; i -= 1) {
+    bytes[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return bytes;
+}
+
+async function taggedHash(tag, data) {
+  const tagHash = await sha256Bytes(utf8Bytes(tag));
+  return sha256Bytes(concatBytes(tagHash, tagHash, data));
+}
+
+function liftX(x) {
+  if (x <= 0n || x >= SECP256K1_P) return null;
+  const c = mod((x * x * x) + 7n, SECP256K1_P);
+  const y = sqrtModSecp256k1(c);
+  if (mod(y * y, SECP256K1_P) !== c) return null;
+  return { x, y: (y & 1n) === 0n ? y : SECP256K1_P - y };
+}
+
+async function verifySchnorrSignatureBip340(messageBytes, signatureBytes, xOnlyPubkeyBytes) {
+  if (!(signatureBytes instanceof Uint8Array) || signatureBytes.length !== 64) return false;
+  if (!(xOnlyPubkeyBytes instanceof Uint8Array) || xOnlyPubkeyBytes.length !== 32) return false;
+
+  const x = bytesToNumber(xOnlyPubkeyBytes);
+  const P = liftX(x);
+  if (!P) return false;
+
+  const r = bytesToNumber(signatureBytes.slice(0, 32));
+  const s = bytesToNumber(signatureBytes.slice(32, 64));
+  if (r >= SECP256K1_P || s >= SECP256K1_N) return false;
+
+  const challengeData = concatBytes(numberToBytes32(r), xOnlyPubkeyBytes, messageBytes);
+  const eHash = await taggedHash('BIP0340/challenge', challengeData);
+  const e = mod(bytesToNumber(eHash), SECP256K1_N);
+
+  const sG = scalarMultiply(SECP256K1_G, s);
+  const eP = scalarMultiply(P, e);
+  const negEP = eP ? { x: eP.x, y: mod(SECP256K1_P - eP.y, SECP256K1_P) } : null;
+  const R = pointAdd(sG, negEP);
+
+  if (!R) return false;
+  if ((R.y & 1n) !== 0n) return false;
+  return R.x === r;
+}
+
 function witnessPublicKeyCandidatesFromTaprootProgram(programBytes) {
   if (!(programBytes instanceof Uint8Array) || programBytes.length !== 32) {
     return [];
@@ -791,13 +840,30 @@ export async function verifyNintondoRawSignature({ address, signature, challenge
       && witnessAddress.program.length === 32
       && witnessAddress.prefix === services.bech32
     ) {
+      const xOnly = witnessAddress.program;
+      // Taproot wallets typically sign with Schnorr BIP-340 over
+      // either the raw challenge bytes or a magic-hashed form.
+      const schnorrMessages = [
+        { bytes: utf8Bytes(challenge), label: 'schnorr-raw-utf8' },
+        { bytes: rawHash, label: 'schnorr-sha256' },
+        { bytes: magicHash, label: 'schnorr-bells-magic' },
+      ];
+      for (const { bytes: messageBytes, label } of schnorrMessages) {
+        if (await verifySchnorrSignatureBip340(messageBytes, signatureBytes, xOnly)) {
+          return {
+            publicKeyHex: bytesToHex(xOnly),
+            publicKeySource: `taproot-address:${label}`,
+          };
+        }
+      }
+      // Fallback: compact ECDSA against both y-candidates.
       const pubkeyCandidates = witnessPublicKeyCandidatesFromTaprootProgram(witnessAddress.program);
       for (const { bytes: hash, label } of candidateHashes) {
         for (const candidate of pubkeyCandidates) {
           if (verifyCompactSecp256k1Signature(hash, signatureBytes, candidate)) {
             return {
               publicKeyHex: bytesToHex(candidate),
-              publicKeySource: `taproot-address:${label}`,
+              publicKeySource: `taproot-address:ecdsa-${label}`,
             };
           }
         }
