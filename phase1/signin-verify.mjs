@@ -99,6 +99,44 @@ function utf8Bytes(value) {
   return new TextEncoder().encode(String(value ?? ''));
 }
 
+function concatBytes(...parts) {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) { out.set(p, offset); offset += p.length; }
+  return out;
+}
+
+function varintEncode(n) {
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error('varint must be non-negative integer');
+  if (n < 0xfd) return new Uint8Array([n]);
+  if (n < 0x10000) return new Uint8Array([0xfd, n & 0xff, (n >> 8) & 0xff]);
+  if (n < 0x100000000) {
+    return new Uint8Array([
+      0xfe,
+      n & 0xff,
+      (n >> 8) & 0xff,
+      (n >> 16) & 0xff,
+      (n >>> 24) & 0xff,
+    ]);
+  }
+  throw new Error('varint too large');
+}
+
+async function bellsBitcoinMessageHash(challenge) {
+  const prefix = utf8Bytes('Bells Signed Message:\n');
+  const message = utf8Bytes(challenge);
+  const data = concatBytes(
+    varintEncode(prefix.length),
+    prefix,
+    varintEncode(message.length),
+    message,
+  );
+  const first = await sha256Bytes(data);
+  return sha256Bytes(first);
+}
+
 async function sha256Bytes(bytes) {
   const crypto = ensureCrypto();
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -735,7 +773,16 @@ export async function verifyNintondoRawSignature({ address, signature, challenge
     throw new Error('Unsupported signature format. Expected Nintondo compact base64 output.');
   }
 
-  const challengeHash = await sha256Bytes(utf8Bytes(challenge));
+  // Nintondo wallet signs with the Bitcoin-style convention:
+  //   doubleSha256(varint(len(prefix)) || "Bells Signed Message:\n" || varint(len(msg)) || msg)
+  // The raw sha256(challenge) variant is tried as a fallback for any older
+  // flow that signed the unwrapped challenge directly.
+  const magicHash = await bellsBitcoinMessageHash(challenge);
+  const rawHash = await sha256Bytes(utf8Bytes(challenge));
+  const candidateHashes = [
+    { bytes: magicHash, label: 'bells-magic' },
+    { bytes: rawHash, label: 'raw-sha256' },
+  ];
 
   try {
     const witnessAddress = decodeWitnessAddress(address);
@@ -745,12 +792,14 @@ export async function verifyNintondoRawSignature({ address, signature, challenge
       && witnessAddress.prefix === services.bech32
     ) {
       const pubkeyCandidates = witnessPublicKeyCandidatesFromTaprootProgram(witnessAddress.program);
-      for (const candidate of pubkeyCandidates) {
-        if (verifyCompactSecp256k1Signature(challengeHash, signatureBytes, candidate)) {
-          return {
-            publicKeyHex: bytesToHex(candidate),
-            publicKeySource: 'taproot-address',
-          };
+      for (const { bytes: hash, label } of candidateHashes) {
+        for (const candidate of pubkeyCandidates) {
+          if (verifyCompactSecp256k1Signature(hash, signatureBytes, candidate)) {
+            return {
+              publicKeyHex: bytesToHex(candidate),
+              publicKeySource: `taproot-address:${label}`,
+            };
+          }
         }
       }
       throw new Error('The supplied signature does not validate for this taproot address.');
@@ -768,14 +817,15 @@ export async function verifyNintondoRawSignature({ address, signature, challenge
     );
   }
 
-  if (!verifyCompactSecp256k1Signature(challengeHash, signatureBytes, discovered.publicKeyBytes)) {
-    throw new Error('The supplied signature does not validate for this address.');
+  for (const { bytes: hash, label } of candidateHashes) {
+    if (verifyCompactSecp256k1Signature(hash, signatureBytes, discovered.publicKeyBytes)) {
+      return {
+        publicKeyHex: bytesToHex(discovered.publicKeyBytes),
+        publicKeySource: `${discovered.source}:${label}`,
+      };
+    }
   }
-
-  return {
-    publicKeyHex: bytesToHex(discovered.publicKeyBytes),
-    publicKeySource: discovered.source,
-  };
+  throw new Error('The supplied signature does not validate for this address.');
 }
 
 export async function verifySigninRequest(request, options = {}) {
