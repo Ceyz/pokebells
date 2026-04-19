@@ -33,6 +33,10 @@ patch-rom.py
 poc-memory.html
 test-nintondo.html
 
+# One-shot dev tools (sprite pack generator, future extraction scripts).
+# Private by default; allowlist specific files here if/when ready to publish.
+tools/
+
 # Phase 4.5 relay — transparent transport layer, safe to publish
 # (no ROM, no IP, pure WebSocket relay + signature verification)
 !phase1/partykit-probe/
