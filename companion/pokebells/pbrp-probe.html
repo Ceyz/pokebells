@@ -208,9 +208,10 @@
     broadcastCount: 0,
   };
 
+  const DEFAULT_INSCRIPTION = '4d3ada6a61bf84f94643dbbc81c7341a2956eaa1af5be60643a67deba91d66b6i0';
   const queryParams = new URLSearchParams(window.location.search);
   const stored = {
-    inscription: queryParams.get('inscription') ?? localStorage.getItem(STORAGE_KEY_INSCRIPTION) ?? '',
+    inscription: queryParams.get('inscription') ?? localStorage.getItem(STORAGE_KEY_INSCRIPTION) ?? DEFAULT_INSCRIPTION,
     network: queryParams.get('network') ?? localStorage.getItem(STORAGE_KEY_NETWORK) ?? 'bells-testnet',
     relay: queryParams.get('host') ?? localStorage.getItem(STORAGE_KEY_RELAY) ?? 'party.bellforge.app',
     room: queryParams.get('room') ?? localStorage.getItem(STORAGE_KEY_ROOM) ?? 'pokebells-probe-pbrp-v1',
@@ -281,16 +282,24 @@
   $('connect-btn').addEventListener('click', async () => {
     try {
       await waitForProvider();
-      const network = $('network').value;
-      const result = await window.nintondo.connect(network);
+      const requested = $('network').value;
+      const result = await window.nintondo.connect(requested);
       const wallet = typeof result === 'string'
         ? result
         : result?.address ?? await window.nintondo.getAccount();
+      const actual = await window.nintondo.getNetwork().catch(() => requested);
       state.wallet = wallet;
       setPill('wallet-pill', 'connected', 'ok');
       $('wallet-addr').textContent = wallet;
       $('authorize-btn').disabled = false;
       log(`wallet connected: ${wallet}`);
+      if (actual && actual !== requested) {
+        $('network').value = actual;
+        localStorage.setItem(STORAGE_KEY_NETWORK, actual);
+        log(`⚠ wallet is on ${actual} but probe was set to ${requested}. Synced config to ${actual}. Switch the wallet extension manually if you wanted the other network.`, 'warn');
+      } else {
+        log(`wallet network: ${actual}`);
+      }
     } catch (err) {
       log(`connect failed: ${err.message ?? err}`, 'err');
       setPill('wallet-pill', 'error', 'err');

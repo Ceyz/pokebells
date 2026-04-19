@@ -16,6 +16,7 @@ import {
 
 const VALID_WALLET_MAINNET = 'bel1pq89re30lzrj5m3sp9wx47svz6a6pj0kg2yudynaxzz3p30ld97qsvgw8s5';
 const VALID_WALLET_TESTNET = 'tpep1q0000000000000000000000000000000000000000';
+const VALID_WALLET_LEGACY = 'BFADD6RogcM2rJ1QjPGZ4yFZkFRnRyoSGo';
 const VALID_INSCRIPTION = '58bf94bfb7214a783656e792dc39490e2a70dd59e9c9221c923f0e4300407681i0';
 
 async function freshSession() {
@@ -65,6 +66,19 @@ test('buildCanonicalSessionChallenge accepts testnet prefix', async () => {
   const expires = issued + 60 * 60 * 1000;
   assert.doesNotThrow(() => buildCanonicalSessionChallenge({
     wallet: VALID_WALLET_TESTNET,
+    sessionPubkey: publicKeyB64url,
+    issuedMs: issued,
+    expiresMs: expires,
+    inscriptionId: VALID_INSCRIPTION,
+  }));
+});
+
+test('buildCanonicalSessionChallenge accepts legacy base58 Bells addresses', async () => {
+  const { publicKeyB64url } = await freshSession();
+  const issued = 1_776_000_000_000;
+  const expires = issued + 60 * 60 * 1000;
+  assert.doesNotThrow(() => buildCanonicalSessionChallenge({
+    wallet: VALID_WALLET_LEGACY,
     sessionPubkey: publicKeyB64url,
     issuedMs: issued,
     expiresMs: expires,

@@ -37,7 +37,10 @@ export const MIN_TTL_MS = 60 * 1000;
 export const SESSION_KEY_CURVE = 'P-256';
 const ECDSA_SIG_BYTES = 64;
 const RAW_P256_PUBKEY_BYTES = 65;
-const BECH32_ADDRESS_RE = /^(bel|tpep)1[0-9a-z]{20,90}$/;
+// Accept both Bells bech32 (bel1…/tpep1…) and legacy base58 (e.g. 'BFADD…').
+// The signature verify downstream is the real authority; this is a shape sanity
+// check only. Rejects empty, whitespace, or punctuated input.
+const BELLS_ADDRESS_RE = /^[0-9A-Za-z]{25,100}$/;
 const INSCRIPTION_ID_RE = /^[0-9a-f]{64}i\d+$/i;
 
 function ensureSubtle() {
@@ -88,8 +91,8 @@ function isSafeMs(value) {
 }
 
 function assertWallet(wallet) {
-  if (typeof wallet !== 'string' || !BECH32_ADDRESS_RE.test(wallet)) {
-    throw new Error('Invalid wallet address. Expected Bells bech32 (bel1… or tpep1…).');
+  if (typeof wallet !== 'string' || !BELLS_ADDRESS_RE.test(wallet)) {
+    throw new Error('Invalid wallet address. Expected a Bells address (bech32 or legacy base58).');
   }
 }
 
