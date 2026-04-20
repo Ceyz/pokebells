@@ -102,9 +102,199 @@
   hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
   label { display: block; font-weight: 600; margin: 12px 0 4px; }
   .field-hint { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
+
+  /* --- Hub tab nav --- */
+  .tabs-bar {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px;
+    margin: 0 0 20px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  }
+  .tab-btn:hover { background: #f0f0f0; }
+  .tab-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .tab-btn .tab-badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.25);
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    margin-left: 6px;
+  }
+  .tab-btn:not(.active) .tab-badge { background: #e0e0e0; color: var(--muted); }
+  .panel[hidden] { display: none; }
+
+  /* --- Home panel --- */
+  .hub-hero {
+    background: linear-gradient(135deg, #378add22 0%, #378add11 100%);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 18px;
+  }
+  .hub-hero h1 { font-size: 26px; margin: 0 0 8px; }
+  .hub-hero p { color: var(--muted); margin: 0 0 18px; }
+  .hub-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .hub-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    cursor: pointer;
+    transition: border-color 120ms, transform 120ms;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    width: 100%;
+  }
+  .hub-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .hub-card .hub-card-icon { font-size: 22px; margin-bottom: 8px; }
+  .hub-card .hub-card-title { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+  .hub-card .hub-card-desc { color: var(--muted); font-size: 13px; margin: 0; }
+  .hub-card.soon { opacity: 0.55; cursor: default; }
+  .hub-card.soon:hover { border-color: var(--border); transform: none; }
+
+  /* --- Trainer panel --- */
+  .trainer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .trainer-header .wallet-pill {
+    background: #eef4fb;
+    color: var(--accent);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font: 600 12px/1 ui-monospace, monospace;
+  }
+  .captures-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 14px;
+  }
+  .capture-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    text-align: center;
+  }
+  .capture-card .sprite {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    image-rendering: pixelated;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .capture-card .sprite img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    image-rendering: pixelated;
+  }
+  .capture-card .species-name { font-weight: 600; font-size: 14px; margin: 0 0 2px; }
+  .capture-card .level { color: var(--muted); font-size: 12px; margin: 0 0 6px; }
+  .capture-card .ivs {
+    font: 500 11px/1.2 ui-monospace, monospace;
+    color: var(--fg);
+    background: #f5f5f5;
+    padding: 4px 6px;
+    border-radius: 4px;
+  }
+  .capture-card .shiny-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #ffd700, #ffa500);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 999px;
+    margin-top: 4px;
+  }
+  .empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--muted);
+  }
+  .empty-state .icon { font-size: 36px; margin-bottom: 10px; }
+
+  /* --- Soon placeholder --- */
+  .soon-box {
+    text-align: center;
+    padding: 60px 24px;
+    background: var(--card);
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    color: var(--muted);
+  }
+  .soon-box h2 { color: var(--fg); margin: 0 0 10px; }
+  .soon-box .soon-icon { font-size: 42px; margin-bottom: 14px; }
 </style>
 </head>
 <body>
+
+<nav class="tabs-bar" id="tabs-bar" aria-label="PokeBells sections">
+  <button class="tab-btn" data-tab="home" type="button">🏠 Home</button>
+  <button class="tab-btn" data-tab="mint" type="button">⚡ Mint</button>
+  <button class="tab-btn" data-tab="trainer" type="button">🧑 Trainer <span class="tab-badge" id="trainer-count">0</span></button>
+  <button class="tab-btn" data-tab="pokedex" type="button">📘 Pokedex</button>
+  <button class="tab-btn" data-tab="leaderboard" type="button">🏆 Leaderboard</button>
+</nav>
+
+<div class="panel" data-panel="home" hidden>
+  <div class="hub-hero">
+    <h1>Welcome to PokeBells</h1>
+    <p>A retro monster-catching game where every capture becomes an on-chain inscription on Bells. Sign in with your wallet, mint your Pokemon, and show them off.</p>
+    <div class="hub-cards">
+      <button class="hub-card" data-goto="mint" type="button">
+        <div class="hub-card-icon">⚡</div>
+        <div class="hub-card-title">Mint a capture</div>
+        <p class="hub-card-desc">Paste the capture JSON from the game, verify provenance, and inscribe on Bells.</p>
+      </button>
+      <button class="hub-card" data-goto="trainer" type="button">
+        <div class="hub-card-icon">🧑</div>
+        <div class="hub-card-title">My Trainer</div>
+        <p class="hub-card-desc">Connect your wallet and see every Pokemon you've caught.</p>
+      </button>
+      <div class="hub-card soon">
+        <div class="hub-card-icon">📘</div>
+        <div class="hub-card-title">Pokedex</div>
+        <p class="hub-card-desc">Browse every capture minted on Bells. Needs our indexer — coming soon.</p>
+      </div>
+      <div class="hub-card soon">
+        <div class="hub-card-icon">🏆</div>
+        <div class="hub-card-title">Leaderboard</div>
+        <p class="hub-card-desc">Top trainers by captures, by IV totals, by shinies. Coming soon.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" data-panel="mint" hidden>
 
 <header>
   <h1>PokeBells Companion</h1>
@@ -192,6 +382,55 @@
   <h2>Activity log</h2>
   <pre id="log">no activity yet</pre>
 </section>
+
+</div><!-- /panel mint -->
+
+<div class="panel" data-panel="trainer" hidden>
+  <div class="trainer-header">
+    <h1 style="margin:0;">My Trainer</h1>
+    <span class="wallet-pill" id="trainer-wallet-pill" hidden></span>
+  </div>
+  <p class="lead">Every Pokemon you've caught, fresh from on-chain. Connect your wallet to scan your inscriptions and render them below.</p>
+
+  <section>
+    <div class="row">
+      <button id="trainer-connect-btn" type="button">Connect wallet</button>
+      <button id="trainer-refresh-btn" class="secondary" type="button" disabled>Refresh</button>
+      <span id="trainer-status" class="muted small">not connected</span>
+    </div>
+  </section>
+
+  <section id="trainer-captures-section" hidden>
+    <h2>Your captures <span id="trainer-count-inline" class="muted small"></span></h2>
+    <div id="trainer-captures" class="captures-grid"></div>
+  </section>
+
+  <section id="trainer-empty-section" hidden>
+    <div class="empty-state">
+      <div class="icon">🎒</div>
+      <p><strong>No PokeBells captures found on this wallet yet.</strong></p>
+      <p class="small">Play the game, capture a Pokemon, then mint it via the Mint tab. It'll show up here.</p>
+    </div>
+  </section>
+</div><!-- /panel trainer -->
+
+<div class="panel" data-panel="pokedex" hidden>
+  <div class="soon-box">
+    <div class="soon-icon">📘</div>
+    <h2>Pokedex — coming soon</h2>
+    <p>Browse every PokeBells capture minted on Bells, filter by species, IVs, shiny status, and jump straight to Nintondo marketplace listings.</p>
+    <p class="small">Needs our indexer running on a Cloudflare Worker (not yet deployed). The scraper reads Nintondo's RSC endpoint to merge listing prices with our on-chain stats.</p>
+  </div>
+</div>
+
+<div class="panel" data-panel="leaderboard" hidden>
+  <div class="soon-box">
+    <div class="soon-icon">🏆</div>
+    <h2>Leaderboard — coming soon</h2>
+    <p>Top trainers by number of captures, highest IV-total Pokemon, rarest shinies, longest uninterrupted play streak.</p>
+    <p class="small">Needs our indexer — same blocker as the Pokedex.</p>
+  </div>
+</div>
 
 <script>
 (() => {
@@ -610,6 +849,167 @@
   if (lastAddr) {
     log(`last connected wallet: ${lastAddr} (click Connect to resume)`);
   }
+
+  // -------- Tab router --------
+  const TABS = ["home", "mint", "trainer", "pokedex", "leaderboard"];
+  const resolveInitialTab = () => {
+    const hash = (window.location.hash || "").replace(/^#/, "");
+    if (TABS.includes(hash)) return hash;
+    if (queryParams.get("inscription") || queryParams.get("inscription_id") || queryParams.get("id")) {
+      return "mint";
+    }
+    return "home";
+  };
+  const switchTab = (name) => {
+    if (!TABS.includes(name)) return;
+    document.querySelectorAll("[data-panel]").forEach((p) => {
+      p.hidden = p.dataset.panel !== name;
+    });
+    document.querySelectorAll(".tab-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === name);
+    });
+    const targetHash = `#${name}`;
+    if (window.location.hash !== targetHash) {
+      history.replaceState(null, "", targetHash + window.location.search);
+    }
+    if (name === "trainer") maybeAutoLoadTrainer();
+  };
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+  document.querySelectorAll(".hub-card[data-goto]").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.goto));
+  });
+  window.addEventListener("hashchange", () => {
+    const hash = (window.location.hash || "").replace(/^#/, "");
+    if (TABS.includes(hash)) switchTab(hash);
+  });
+  switchTab(resolveInitialTab());
+
+  // -------- Trainer tab --------
+  const CONTENT_BASES = {
+    "bells-mainnet": "https://bells-mainnet-content.nintondo.io/content/",
+    "bells-testnet": "https://bells-testnet-content.nintondo.io/content/",
+  };
+  let trainerAddress = null;
+  let trainerNetworkKey = null;
+  let trainerHasLoaded = false;
+
+  const shortAddr = (addr) => addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+
+  const resolveSpriteUrl = (parsed, networkKey) => {
+    const img = parsed?.nft_metadata?.image;
+    if (!img || typeof img !== "string") return null;
+    const base = CONTENT_BASES[networkKey];
+    if (!base) return null;
+    if (img.startsWith("http://") || img.startsWith("https://")) return img;
+    if (img.startsWith("/content/")) return base + img.slice("/content/".length);
+    return base + img.replace(/^\/+/, "");
+  };
+
+  const renderCaptureCard = (parsed, networkKey) => {
+    const card = document.createElement("div");
+    card.className = "capture-card";
+
+    const spriteBox = document.createElement("div");
+    spriteBox.className = "sprite";
+    const spriteUrl = resolveSpriteUrl(parsed, networkKey);
+    if (spriteUrl) {
+      const img = document.createElement("img");
+      img.src = spriteUrl;
+      img.alt = parsed.species_name ?? `species ${parsed.species_id}`;
+      img.loading = "lazy";
+      spriteBox.appendChild(img);
+    } else {
+      spriteBox.textContent = "❓";
+    }
+    card.appendChild(spriteBox);
+
+    const name = document.createElement("p");
+    name.className = "species-name";
+    name.textContent = parsed.species_name ?? `Species #${parsed.species_id}`;
+    card.appendChild(name);
+
+    const level = document.createElement("p");
+    level.className = "level";
+    level.textContent = `Lv. ${parsed.level}`;
+    card.appendChild(level);
+
+    const ivSpecial = Number.isInteger(parsed.ivs?.spc) ? parsed.ivs.spc : parsed.ivs?.spd;
+    const ivs = document.createElement("div");
+    ivs.className = "ivs";
+    ivs.textContent = `${parsed.ivs?.atk}/${parsed.ivs?.def}/${parsed.ivs?.spe}/${ivSpecial ?? "?"}`;
+    card.appendChild(ivs);
+
+    if (parsed.shiny) {
+      const shiny = document.createElement("span");
+      shiny.className = "shiny-badge";
+      shiny.textContent = "✨ SHINY";
+      card.appendChild(shiny);
+    }
+
+    return card;
+  };
+
+  const setTrainerStatus = (text, tone) => {
+    const el = $("trainer-status");
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+
+  const loadTrainerCaptures = async () => {
+    if (!trainerAddress || !trainerNetworkKey) return;
+    setTrainerStatus("scanning inscriptions…");
+    $("trainer-refresh-btn").disabled = true;
+    $("trainer-captures-section").hidden = true;
+    $("trainer-empty-section").hidden = true;
+
+    // TODO: replace with our Cloudflare Worker indexer endpoint once deployed.
+    // Short-term options until then: (1) scrape Nintondo RSC on /bells/address/<addr>
+    // page, (2) use bells-*-content.nintondo.io per-inscription content fetch once
+    // IDs are known. Both need probing; ship shell now, wire later.
+    try {
+      setTrainerStatus("indexer not yet deployed — UI shell ready, capture scan pending", "warn");
+      $("trainer-empty-section").hidden = false;
+      $("trainer-count").textContent = "0";
+      $("trainer-count-inline").textContent = "(0)";
+    } catch (e) {
+      setTrainerStatus(`scan failed: ${e.message ?? e}`, "err");
+    } finally {
+      $("trainer-refresh-btn").disabled = false;
+      trainerHasLoaded = true;
+    }
+  };
+
+  const maybeAutoLoadTrainer = () => {
+    if (trainerAddress && !trainerHasLoaded) loadTrainerCaptures();
+  };
+
+  $("trainer-connect-btn").addEventListener("click", async () => {
+    try {
+      const netCfg = getSelectedNetworkConfig();
+      const result = await window.nintondo.connect(netCfg.connectNetwork);
+      trainerAddress = typeof result === "string"
+        ? result
+        : result?.address ?? await window.nintondo.getAccount();
+      const rawNet = await window.nintondo.getNetwork().catch(() => netCfg.connectNetwork);
+      trainerNetworkKey = normalizeNetworkKey(rawNet) ?? "bells-mainnet";
+      const pill = $("trainer-wallet-pill");
+      pill.textContent = shortAddr(trainerAddress);
+      pill.hidden = false;
+      setTrainerStatus(`connected: ${trainerNetworkKey}`, "ok");
+      $("trainer-refresh-btn").disabled = false;
+      trainerHasLoaded = false;
+      await loadTrainerCaptures();
+    } catch (e) {
+      setTrainerStatus(`connect failed: ${e.message ?? e}`, "err");
+    }
+  });
+
+  $("trainer-refresh-btn").addEventListener("click", () => {
+    trainerHasLoaded = false;
+    loadTrainerCaptures();
+  });
 })();
 </script>
 
