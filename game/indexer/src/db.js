@@ -134,12 +134,12 @@ export async function leaderboardByCount(env, network, limit) {
 export async function networkStats(env) {
   const row = await env.DB.prepare(`
     SELECT
-      COUNT(*)                                               AS total,
-      SUM(CASE WHEN network='bells-mainnet' THEN 1 ELSE 0 END) AS mainnet,
-      SUM(CASE WHEN network='bells-testnet' THEN 1 ELSE 0 END) AS testnet,
-      SUM(shiny)                                             AS shinies,
-      COUNT(DISTINCT owner_address)                          AS unique_trainers,
-      COUNT(DISTINCT species_id)                             AS unique_species
+      COUNT(*)                                                        AS total,
+      COALESCE(SUM(CASE WHEN network='bells-mainnet' THEN 1 ELSE 0 END), 0) AS mainnet,
+      COALESCE(SUM(CASE WHEN network='bells-testnet' THEN 1 ELSE 0 END), 0) AS testnet,
+      COALESCE(SUM(shiny), 0)                                         AS shinies,
+      COUNT(DISTINCT owner_address)                                   AS unique_trainers,
+      COUNT(DISTINCT species_id)                                      AS unique_species
     FROM captures
     WHERE valid = 1
   `).first();
