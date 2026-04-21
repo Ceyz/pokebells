@@ -8,7 +8,7 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "pokebells-indexer"
-database_id = "REPLACE_ME_AFTER_wrangler_d1_create"
+database_id = "0e335b0e-ddb4-45a4-8d00-889fe2bd1011"
 
 # Environment variables consumed by the worker. Override per-env if needed.
 [vars]
