@@ -378,6 +378,25 @@
   <div id="validation-result"></div>
 </section>
 
+<section id="register-section">
+  <h2>3 · Register the inscription with the official indexer</h2>
+  <p class="muted small">
+    After the Nintondo Inscriber confirms the mint, copy the returned inscription id
+    and paste it below. The indexer re-fetches the on-chain content, re-validates it,
+    and stores the capture so it appears in the Trainer / Pokedex / Leaderboard tabs.
+    Captures not registered here still exist on-chain but are invisible to the official UIs.
+  </p>
+
+  <label for="register-inscription-id">Inscription ID (from Inscriber)</label>
+  <input type="text" id="register-inscription-id"
+         placeholder="e.g. eef1cf1566701fc5854c7f8afb695cc2ad52dda9599a7a574e3bc3cd317d5a71i0">
+
+  <div class="row">
+    <button id="register-btn" type="button">Register with indexer</button>
+    <span id="register-status" class="muted small"></span>
+  </div>
+</section>
+
 <section id="log-section">
   <h2>Activity log</h2>
   <pre id="log">no activity yet</pre>
@@ -450,6 +469,15 @@
     },
   };
   const INSCRIBER_BASE = "https://nintondo.io/inscriber";
+  // Indexer base URL. Override for dev via:
+  //   localStorage.setItem("pokebells.indexer_base", "https://<worker>.workers.dev");
+  // Default points at the custom domain that will be bound after the first
+  // Cloudflare Worker deploy + DNS setup. See game/indexer/README.md.
+  const INDEXER_BASE_DEFAULT = "https://indexer.bellforge.app";
+  const INDEXER_BASE = (() => {
+    const override = (() => { try { return localStorage.getItem("pokebells.indexer_base"); } catch { return null; } })();
+    return (override && override.trim()) || INDEXER_BASE_DEFAULT;
+  })();
   const SIGNATURE_TTL_HOURS = 24;
   const BLOCK_HASH_RE = /^[0-9a-f]{64}$/i;
   const WRAM_BYTE_LENGTH = 0x2000;
@@ -957,24 +985,49 @@
     el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
   };
 
+  const renderTrainerCaptures = (captures) => {
+    const grid = $("trainer-captures");
+    grid.replaceChildren();
+    for (const row of captures) {
+      const fakeParsed = {
+        species_id: row.species_id,
+        species_name: row.species_name,
+        level: row.level,
+        shiny: row.shiny === 1,
+        ivs: { atk: row.iv_atk, def: row.iv_def, spe: row.iv_spe, spc: row.iv_special },
+        nft_metadata: { image: null },
+      };
+      grid.appendChild(renderCaptureCard(fakeParsed, trainerNetworkKey));
+    }
+  };
+
   const loadTrainerCaptures = async () => {
     if (!trainerAddress || !trainerNetworkKey) return;
-    setTrainerStatus("scanning inscriptions…");
+    setTrainerStatus("loading captures from indexer…");
     $("trainer-refresh-btn").disabled = true;
     $("trainer-captures-section").hidden = true;
     $("trainer-empty-section").hidden = true;
 
-    // TODO: replace with our Cloudflare Worker indexer endpoint once deployed.
-    // Short-term options until then: (1) scrape Nintondo RSC on /bells/address/<addr>
-    // page, (2) use bells-*-content.nintondo.io per-inscription content fetch once
-    // IDs are known. Both need probing; ship shell now, wire later.
     try {
-      setTrainerStatus("indexer not yet deployed — UI shell ready, capture scan pending", "warn");
-      $("trainer-empty-section").hidden = false;
-      $("trainer-count").textContent = "0";
-      $("trainer-count-inline").textContent = "(0)";
+      const url = `${INDEXER_BASE}/api/trainer/${encodeURIComponent(trainerAddress)}?network=${encodeURIComponent(trainerNetworkKey)}`;
+      const r = await fetch(url, { headers: { accept: "application/json" } });
+      if (!r.ok) {
+        throw new Error(`indexer HTTP ${r.status}`);
+      }
+      const payload = await r.json();
+      const captures = Array.isArray(payload?.captures) ? payload.captures : [];
+      $("trainer-count").textContent = String(captures.length);
+      $("trainer-count-inline").textContent = `(${captures.length})`;
+      if (captures.length === 0) {
+        $("trainer-empty-section").hidden = false;
+        setTrainerStatus("no captures registered yet", "warn");
+      } else {
+        renderTrainerCaptures(captures);
+        $("trainer-captures-section").hidden = false;
+        setTrainerStatus(`${captures.length} capture${captures.length === 1 ? "" : "s"} loaded`, "ok");
+      }
     } catch (e) {
-      setTrainerStatus(`scan failed: ${e.message ?? e}`, "err");
+      setTrainerStatus(`load failed: ${e.message ?? e} (indexer may not be deployed yet)`, "err");
     } finally {
       $("trainer-refresh-btn").disabled = false;
       trainerHasLoaded = true;
@@ -1009,6 +1062,51 @@
   $("trainer-refresh-btn").addEventListener("click", () => {
     trainerHasLoaded = false;
     loadTrainerCaptures();
+  });
+
+  // -------- Register minted capture with indexer --------
+  const setRegisterStatus = (text, tone) => {
+    const el = $("register-status");
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+
+  $("register-btn").addEventListener("click", async () => {
+    const inscriptionId = $("register-inscription-id").value.trim();
+    if (!/^[0-9a-f]{64}i\d+$/i.test(inscriptionId)) {
+      setRegisterStatus("inscription id must look like <64hex>i<N>", "err");
+      return;
+    }
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
+    setRegisterStatus("registering…");
+    $("register-btn").disabled = true;
+    try {
+      const r = await fetch(`${INDEXER_BASE}/api/captures`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inscription_id: inscriptionId, network: networkKey }),
+      });
+      const payload = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const reason = payload?.reason ?? payload?.error ?? `HTTP ${r.status}`;
+        setRegisterStatus(`rejected: ${reason}`, "err");
+        log(`register rejected: ${reason}`);
+      } else if (payload?.status === "duplicate") {
+        setRegisterStatus("already registered — nothing to do", "ok");
+        log(`register duplicate: ${inscriptionId}`);
+      } else {
+        setRegisterStatus(`registered ✓ species ${payload?.species_id}, IV total ${payload?.iv_total}`, "ok");
+        log(`registered: ${inscriptionId} species=${payload?.species_id}`);
+        trainerHasLoaded = false; // force refresh next time Trainer tab opens
+      }
+    } catch (e) {
+      setRegisterStatus(`request failed: ${e.message ?? e}`, "err");
+      log(`register request failed: ${e.message ?? e}`);
+    } finally {
+      $("register-btn").disabled = false;
+    }
   });
 })();
 </script>

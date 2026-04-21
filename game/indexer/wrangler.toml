@@ -1,0 +1,25 @@
+name = "pokebells-indexer"
+main = "src/worker.js"
+compatibility_date = "2026-04-20"
+workers_dev = true
+
+# D1 database binding. Create once via `wrangler d1 create pokebells-indexer`
+# then paste the returned database_id here before first deploy.
+[[d1_databases]]
+binding = "DB"
+database_name = "pokebells-indexer"
+database_id = "REPLACE_ME_AFTER_wrangler_d1_create"
+
+# Environment variables consumed by the worker. Override per-env if needed.
+[vars]
+CONTENT_BASE_MAINNET = "https://bells-mainnet-content.nintondo.io/content/"
+CONTENT_BASE_TESTNET = "https://bells-testnet-content.nintondo.io/content/"
+ELECTRS_BASE_MAINNET = "https://api.nintondo.io"
+ELECTRS_BASE_TESTNET = "https://bells-testnet-api.nintondo.io"
+
+# Custom domain binding — uncomment after first deploy + DNS verification.
+# Requires CLOUDFLARE_API_TOKEN scoped Workers Scripts:Edit + Zone:DNS:Edit.
+#
+# [[routes]]
+# pattern = "indexer.bellforge.app"
+# custom_domain = true

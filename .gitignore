@@ -45,9 +45,13 @@ game/partykit-probe/.partykit/
 !game/cf-relay/
 game/cf-relay/node_modules/
 game/cf-relay/.wrangler/
+!game/indexer/
+game/indexer/node_modules/
+game/indexer/.wrangler/
 !game/signin-verify.mjs
 !game/pbrp/
 !.github/workflows/cf-relay.yml
+!.github/workflows/indexer.yml
 
 # Synthesized by pages.yml at deploy — source of truth is game/pbrp/
 companion/pokebells/pbrp/

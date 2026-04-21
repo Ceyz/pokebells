@@ -1,0 +1,16 @@
+{
+  "name": "pokebells-indexer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "node --check src/worker.js && node --check src/validator.js && node --check src/db.js",
+    "test": "node --test src/validator.test.js",
+    "d1:create": "wrangler d1 create pokebells-indexer",
+    "d1:migrate": "wrangler d1 execute pokebells-indexer --file=schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0"
+  }
+}
