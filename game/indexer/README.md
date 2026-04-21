@@ -14,39 +14,72 @@ inscription-listing API, so the companion posts each new inscription id to
    existence on the claimed network).
 3. On success, inserts a row into D1. Duplicate posts are idempotent.
 
-Captures minted outside this flow (e.g. manually via the Nintondo Inscriber
-with tampered JSON) never reach the indexer and therefore never appear in
-the official collection UI. That's the anti-cheat boundary.
+Captures minted outside this flow never reach the indexer and therefore never
+appear in the official collection UI. That's the anti-cheat boundary.
 
-## One-time setup
+## Bootstrap — zero local install, all Cloudflare + GitHub
 
-```bash
-cd game/indexer
-npm install
-npx wrangler login                        # if not already authed locally
-npx wrangler d1 create pokebells-indexer  # prints a database_id
-# paste the printed database_id into wrangler.toml
-npm run d1:migrate                        # applies schema.sql against the DB
-npm run deploy                            # first deploy to *.workers.dev
+### 1. Create the D1 database (CF Dashboard, once)
+
+[Workers & Pages → D1](https://dash.cloudflare.com/?to=/:account/workers/d1)
+→ **Create database** → name: `pokebells-indexer`. Copy the **Database ID**
+shown (UUID format).
+
+### 2. Paste the Database ID (GitHub web editor, once)
+
+Edit `game/indexer/wrangler.toml` directly on github.com, replace
+`REPLACE_ME_AFTER_wrangler_d1_create` with the UUID from step 1, commit to
+`main`. The push triggers the deploy workflow.
+
+### 3. Ensure the CF API token has D1 scope
+
+The existing `CLOUDFLARE_API_TOKEN` secret must include `Account → D1 → Edit`
+in addition to `Account → Workers Scripts → Edit` (used by the relay deploy).
+If your token was created with Workers-only scopes, edit it in
+[dash → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+and add the D1 permission. No redeploy of the token secret needed —
+GitHub reads the same value.
+
+### 4. That's it
+
+The workflow (`.github/workflows/indexer.yml`) now:
+
+- `npm ci`
+- `npm run check` (syntax only)
+- `npm run d1:migrate` → applies `schema.sql` via `wrangler d1 execute --remote`
+- `npx wrangler deploy`
+
+First run prints the `*.workers.dev` URL. Hit `/health` to confirm:
+
+```
+GET https://pokebells-indexer.<account>.workers.dev/health
+→ {"ok": true, "service": "pokebells-indexer", "version": "v1"}
 ```
 
-Custom domain (optional, once the worker is live):
+## Custom domain (optional, all CF Dashboard)
 
-1. Uncomment the `[[routes]]` block in `wrangler.toml` with the target
-   hostname (e.g. `indexer.bellforge.app`).
-2. Ensure the Cloudflare zone for that domain belongs to the same account.
-3. `npm run deploy` again.
+1. [DNS tab](https://dash.cloudflare.com/?to=/:account/:zone/dns/records)
+   for `bellforge.app` → **Add record** → CNAME `indexer` → target
+   `<whatever>.workers.dev` → **Proxy status: DNS only** (grey cloud). Save.
+2. Edit `game/indexer/wrangler.toml` on github.com — uncomment the
+   `[[routes]]` block with `pattern = "indexer.bellforge.app"`. Commit.
+3. Next workflow run binds the route. `curl https://indexer.bellforge.app/health`
+   confirms.
 
-## CI
+The companion's `INDEXER_BASE_DEFAULT` already points at
+`https://indexer.bellforge.app`, so the Trainer tab and Mint register flow
+light up automatically once the DNS + route resolve.
 
-`.github/workflows/indexer.yml` runs `wrangler deploy` on every push to
-`main` that touches `game/indexer/**`. Uses the same
-`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` secrets as the relay
-workflow.
+## Dev-time override (no custom domain yet)
 
-The schema migration is **not** automated — re-run `npm run d1:migrate`
-manually after editing `schema.sql`. D1 schema changes can drop data if
-done wrong; keep migrations explicit.
+Before the custom domain is live, point the companion at the workers.dev URL
+from the browser console:
+
+```js
+localStorage.setItem("pokebells.indexer_base", "https://pokebells-indexer.<account>.workers.dev")
+```
+
+Reload `bellforge.app/pokebells`. Clear the key to revert to the default.
 
 ## Endpoints
 
@@ -79,29 +112,19 @@ unchanged on the Worker. Order, short-circuit on first failure:
 Every attempt (ok, duplicate, invalid, error) is logged in
 `ingestion_log` with a /24 or /48 IP prefix for abuse detection.
 
-## Client usage (companion)
+## Schema changes
 
-```js
-await fetch("https://indexer.bellforge.app/api/captures", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    inscription_id: "<id_from_inscriber>i0",
-    network: "bells-mainnet",  // or bells-testnet
-  }),
-});
-```
-
-```js
-const r = await fetch(`https://indexer.bellforge.app/api/trainer/${addr}?network=bells-mainnet`);
-const { captures } = await r.json();
-```
+Edit `schema.sql` and push — the workflow re-runs `wrangler d1 execute
+--remote --file=schema.sql` before every deploy. Every `CREATE` is guarded
+with `IF NOT EXISTS`, so re-applying is safe. For destructive migrations
+(DROP, ALTER) use explicit one-shot SQL files and run them manually from
+the D1 Console in the CF Dashboard.
 
 ## Future work
 
-- **Chain-scan fallback.** A scheduled trigger (`[triggers] crons = ["*/5 * * * *"]`)
-  that reconciles against any inscription-listing API Nintondo eventually
-  ships, or RSC scraping as a stopgap. Catches captures missed when the
+- **Chain-scan fallback.** Scheduled trigger (`[triggers] crons`) that
+  reconciles against any inscription-listing API Nintondo eventually ships
+  (or RSC scraping as a stopgap). Catches captures missed when the
   companion tab crashed between sign + post.
 - **On-chain owner verification.** Currently we trust `signed_in_wallet`
   for ownership queries. Adding a lookup against Nintondo's inscription

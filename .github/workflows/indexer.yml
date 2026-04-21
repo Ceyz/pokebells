@@ -36,6 +36,12 @@ jobs:
       - name: Check syntax
         run: npm run check
 
+      - name: Apply D1 schema (idempotent)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run d1:migrate
+
       - name: Deploy to Cloudflare
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
