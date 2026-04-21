@@ -8,13 +8,13 @@ shin_patch.zip
 *.ips
 
 # ROM chunks generated for inscriptions (encoded ROM)
-phase1/chunks/
+game/chunks/
 
 # Reverse-engineering artifacts (Nintondo extension/viewer bundles)
-phase1/tmp-*
+game/tmp-*
 
 # Local TLS dev certs (private keys!)
-phase1/.https-cert/
+game/.https-cert/
 *.pem
 *.key
 
@@ -26,7 +26,7 @@ memory.md
 pokebells_roadmap*.html
 
 # Local research / prototype work not meant for the public companion repo
-phase1/*
+game/*
 poc/
 download.py
 patch-rom.py
@@ -39,17 +39,17 @@ tools/
 
 # Phase 4.5 relay — transparent transport layer, safe to publish
 # (no ROM, no IP, pure WebSocket relay + signature verification)
-!phase1/partykit-probe/
-phase1/partykit-probe/node_modules/
-phase1/partykit-probe/.partykit/
-!phase1/cf-relay/
-phase1/cf-relay/node_modules/
-phase1/cf-relay/.wrangler/
-!phase1/signin-verify.mjs
-!phase1/pbrp/
+!game/partykit-probe/
+game/partykit-probe/node_modules/
+game/partykit-probe/.partykit/
+!game/cf-relay/
+game/cf-relay/node_modules/
+game/cf-relay/.wrangler/
+!game/signin-verify.mjs
+!game/pbrp/
 !.github/workflows/cf-relay.yml
 
-# Synthesized by pages.yml at deploy — source of truth is phase1/pbrp/
+# Synthesized by pages.yml at deploy — source of truth is game/pbrp/
 companion/pokebells/pbrp/
 companion/pokebells/signin-verify.mjs
 

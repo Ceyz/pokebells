@@ -5,8 +5,8 @@ on:
     branches: [main]
     paths:
       - "companion/**"
-      - "phase1/pbrp/**"
-      - "phase1/signin-verify.mjs"
+      - "game/pbrp/**"
+      - "game/signin-verify.mjs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -34,8 +34,8 @@ jobs:
       - name: Sync PBRP shared modules into companion
         run: |
           mkdir -p companion/pokebells/pbrp
-          cp phase1/pbrp/session-key.mjs companion/pokebells/pbrp/session-key.mjs
-          cp phase1/signin-verify.mjs companion/pokebells/signin-verify.mjs
+          cp game/pbrp/session-key.mjs companion/pokebells/pbrp/session-key.mjs
+          cp game/signin-verify.mjs companion/pokebells/signin-verify.mjs
 
       - name: Upload companion/ as artifact
         uses: actions/upload-pages-artifact@v3

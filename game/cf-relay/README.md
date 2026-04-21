@@ -9,14 +9,14 @@ interactive CLI login — deploys with only `CLOUDFLARE_ACCOUNT_ID` +
 
 ## Deploy
 
-From CI: push to `main` with changes under `phase1/cf-relay/` triggers
+From CI: push to `main` with changes under `game/cf-relay/` triggers
 `.github/workflows/cf-relay.yml`, which runs `npx wrangler deploy` with the
 same CF secrets already configured for the repo.
 
 Local:
 
 ```powershell
-cd Z:\PokeBells\phase1\cf-relay
+cd Z:\PokeBells\game\cf-relay
 npm ci
 npx wrangler deploy
 ```

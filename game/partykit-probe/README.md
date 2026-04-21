@@ -11,7 +11,7 @@ It has two connection modes:
 - `wallet` mode: non-probe rooms require the same signed PokeBells sign-in
   fields as the game URL: `wallet`, `sig`, `issued`, `expires`, `nonce`, and
   `inscription` / `inscription_id`. The server verifies the Nintondo signature
-  with `phase1/signin-verify.mjs` before accepting the WebSocket.
+  with `game/signin-verify.mjs` before accepting the WebSocket.
 
 It also supports Phase 4.5 position messages:
 
@@ -70,7 +70,7 @@ the WebSocket relay.
 ## Optional Local Install
 
 ```powershell
-cd Z:\PokeBells\phase1\partykit-probe
+cd Z:\PokeBells\game\partykit-probe
 npm install
 ```
 
@@ -80,7 +80,7 @@ If `pokebells-probe` is already taken under your PartyKit account, edit
 `partykit.json` and change `name`.
 
 ```powershell
-cd Z:\PokeBells\phase1\partykit-probe
+cd Z:\PokeBells\game\partykit-probe
 npm run deploy
 ```
 
@@ -95,7 +95,7 @@ pokebells-probe.<your-user>.partykit.dev
 Inscribe:
 
 ```text
-Z:\PokeBells\phase1\mainnet-canary\websocket-partykit-probe.html
+Z:\PokeBells\game\mainnet-canary\websocket-partykit-probe.html
 ```
 
 Open the resulting Nintondo inscription with:
@@ -127,7 +127,7 @@ Expected success:
 Inscribe:
 
 ```text
-Z:\PokeBells\phase1\mainnet-canary\mmo-overlay-probe.html
+Z:\PokeBells\game\mainnet-canary\mmo-overlay-probe.html
 ```
 
 Open it in two browsers, two devices, or two tabs with the same host and room:
