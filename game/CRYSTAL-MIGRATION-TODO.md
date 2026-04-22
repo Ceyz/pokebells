@@ -156,6 +156,79 @@ Port plan (order matters):
 - [ ] Repeat on mainnet. Freeze schema v1.3 + attestation scheme in the
       mainnet root inscription's doc.
 
+## Post-PoC roadmap (KENOBI Space learnings, 2026-04-23)
+
+Additions after listening to the KENOBI Game Hub Twitter Space + decoding the
+Dookie inscription source. Confirms our companion + bellforge direction
+(see `memory/dookie_source_analysis.md` and
+`memory/kenobi_space_roadmap_impact.md`). Non-blocking for Crystal PoC
+launch — all additive work to ship AFTER the 17-inscription dry run lives.
+
+### [BRIDGE-1] Promote `play-bridge.html` to canonical Play entry
+
+- [ ] Audit `companion/pokebells/play-bridge.html` + the game-side shim in
+      `game/index.html`. Fill any gaps (top-level redirect when
+      ?manifest= is present, wallet detection, auto-inject ?companion=
+      for mint handoff).
+- [ ] Replace the `⚡ Mint` card on the hub home with a `▶ Play` card that
+      points at play-bridge. Move direct companion mint to a secondary
+      `Mint / Reveal (advanced)` entry — keeps it available for power
+      users + as fallback, removes it from the default user path.
+- [ ] Bridge auto-routes: if a compatible bridge inscription URL is
+      known, route through bridge → content direct → companion fallback.
+      User never learns the distinction.
+
+### [BRIDGE-2] Add `bridge_urls[]` to service discovery
+
+- [ ] Extend the `p:pokebells-collection` schema draft
+      (`game/schemas/pokebells-collection.schema.md`) with
+      `bridge_urls[]` alongside `companion_urls[]` + `indexer_urls[]`
+      already planned.
+- [ ] Implement a single `resolveServiceUrl(role)` helper in
+      `game/shell.js` that runs the unified chain:
+      `?<role>=<url>` → `localStorage` → collection inscription →
+      hardcoded fallback. Replace the two separate resolvers for
+      companion + indexer with this generic one.
+- [ ] Ship the first `p:pokebells-collection` inscription with seeded
+      companion + indexer + bridge URLs once Crystal PoC is live on
+      mainnet.
+
+### [BRIDGE-3] Package bridge + minimal companion as inscription sources
+
+- [ ] Mirror `tools/package-indexer-for-inscription.mjs` with new
+      packagers for bridge HTML + minimal companion. Community can fork,
+      redeploy under a different domain, and list themselves in the
+      next `p:pokebells-collection` update without any of our
+      infrastructure.
+
+### [PERKS-1] Asset-gated extras (cosmetics / badges / events only)
+
+Scope is **strictly non-critical UX** — the core catch + mint + trade
+loop stays permissionless. Ship this only once the game is live +
+mainnet trading is active (not before).
+
+- [ ] Non-gated baseline: all capture + trade features work without
+      holding any specific asset. Do NOT gate the catch loop.
+- [ ] Cosmetic gating: battle-sprite variants, trainer skins,
+      seasonal frames — unlock by proving ownership of a chosen
+      asset (e.g. "holds a shiny Mewtwo" → gold-frame badge).
+- [ ] Access gating (optional): private battle rooms, trade halls,
+      seasonal event dungeons — proof-of-ownership gate only, no
+      mint required at the gate.
+- [ ] Wallet-connect at the gate, signed by the session key already
+      defined in `pbrp/session-key.mjs`. Piggyback on the existing
+      PBRP auth rather than adding a new flow.
+
+### Pivot trigger for Gen 3 (FireRed/LeafGreen, GBA)
+
+Not in scope of this TODO but recorded so it doesn't get forgotten:
+
+- [ ] Only revisit after Crystal PoC is inscribed on mainnet AND
+      there is observed user demand for Gen 3 content. See
+      `memory/pokemon_crystal_pivot.md` for the deferred-decision
+      rationale. Expected cost if triggered: ~4-6 weeks (mGBA
+      emulator 5-10 MB, ROM 16 MB = ~70 chunks, schema reset).
+
 ## Quick commands
 
 ```bash
