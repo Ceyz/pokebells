@@ -1,0 +1,107 @@
+{
+  "format": "pokebells-inscription-plan-v1",
+  "generatedAt": "2026-04-22T03:13:35.771Z",
+  "network": "bells-testnet",
+  "contentBaseUrl": "https://bells-testnet-content.nintondo.io/content/",
+  "notes": [
+    "Fill inscriptionId placeholders after each asset is inscribed on Bells testnet.",
+    "The shell can load either manifest.local.json or manifest.testnet-template.json."
+  ],
+  "assets": [
+    {
+      "role": "runtime-js",
+      "placeholder": "BINJGB_JS_INSCRIPTION_ID",
+      "file": "../poc/binjgb.js",
+      "byteLength": 21626,
+      "sha256": "4cadb3dbe040fc773c2ea64263a8ca8bfe52795036a16de1222c96d0af30c779"
+    },
+    {
+      "role": "runtime-wasm",
+      "placeholder": "BINJGB_WASM_INSCRIPTION_ID",
+      "file": "../poc/binjgb.wasm",
+      "byteLength": 98685,
+      "sha256": "a6267f82c41d1c24d895e95ae397170ab53276704384dbb5f705f8a669d0ec5d"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 0,
+      "placeholder": "ROM_CHUNK_000_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part000.bin",
+      "byteOffset": 0,
+      "byteLength": 245760,
+      "sha256": "9f42581576d8048ea63b122dc2be0ce819c5bc602a865c0f7ee96a6079960140"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 1,
+      "placeholder": "ROM_CHUNK_001_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part001.bin",
+      "byteOffset": 245760,
+      "byteLength": 245760,
+      "sha256": "f5cd24b14fdb4de97a64910ed0f1a3cb71f748015d6a43947059197e8682f50b"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 2,
+      "placeholder": "ROM_CHUNK_002_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part002.bin",
+      "byteOffset": 491520,
+      "byteLength": 245760,
+      "sha256": "9693b1821eb4959406e90e3c574fcbe0eac513c8ecc08fe848e61095ac32358e"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 3,
+      "placeholder": "ROM_CHUNK_003_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part003.bin",
+      "byteOffset": 737280,
+      "byteLength": 245760,
+      "sha256": "06f9a59b6ce3802841ef9880e652b7d453c1461e2c3dd0a191ad8aa5d7b8bbe0"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 4,
+      "placeholder": "ROM_CHUNK_004_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part004.bin",
+      "byteOffset": 983040,
+      "byteLength": 245760,
+      "sha256": "53052f71da35d89952e289e1d82a130db8f5d64e0ae207c18d57e29a360f1adc"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 5,
+      "placeholder": "ROM_CHUNK_005_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part005.bin",
+      "byteOffset": 1228800,
+      "byteLength": 245760,
+      "sha256": "51effb5334a57166bfc165855c18381b2b53684e111af05759ad0921d8e08ec2"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 6,
+      "placeholder": "ROM_CHUNK_006_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part006.bin",
+      "byteOffset": 1474560,
+      "byteLength": 245760,
+      "sha256": "1a2d5c849c68bcd1884ae6eb104692fca85f8023708728c274506f001aba8801"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 7,
+      "placeholder": "ROM_CHUNK_007_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part007.bin",
+      "byteOffset": 1720320,
+      "byteLength": 245760,
+      "sha256": "01e167efda1d74c086924eac3fb2c99a75aaa86b7b21c8487311942369846835"
+    },
+    {
+      "role": "rom-chunk",
+      "index": 8,
+      "placeholder": "ROM_CHUNK_008_INSCRIPTION_ID",
+      "file": "chunks/pokecrystal-d6702e353dcb/pokecrystal.part008.bin",
+      "byteOffset": 1966080,
+      "byteLength": 131072,
+      "sha256": "157b54a11baee659ef91915aef7b395e2420d506475c821330abd301b86a35f1"
+    }
+  ]
+}

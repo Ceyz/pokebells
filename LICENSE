@@ -1,0 +1,48 @@
+MIT License
+
+Copyright (c) 2026 PokeBells contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Scope notes (not binding, informational):
+
+- This license covers all source code in this repository, including the
+  CloudFlare Worker indexer (`game/indexer/`), the PartyKit / CF relay
+  (`game/cf-relay/`, `game/partykit-probe/`), the companion UI
+  (`companion/`), and any ES modules published under `game/pbrp/`,
+  `game/signin-verify.mjs`.
+
+- The `game/` directory is gitignored by default (the Pokemon ROM and
+  IP-derived artifacts live there), with explicit whitelist for the
+  open-source infrastructure subdirectories. See `.gitignore`.
+
+- Pokemon franchise trademarks, sprites, ROM assets, and in-game content
+  remain the property of Nintendo, Game Freak, and Creatures Inc. This
+  license does NOT grant any rights over Pokemon intellectual property.
+  The indexer code is generic Bells ordinals tooling; it happens to be
+  used for a Pokemon-themed on-chain game but is not derived from
+  Nintendo assets.
+
+- Contributors to the PokeBells protocol schemas (`p:pokebells`,
+  `p:pokebells-manifest`, `p:pokebells-sprites`, `p:pokebells-collection`)
+  license their schema contributions under the same MIT terms. Schema
+  locks (see `memory/schema_v14_commit_reveal.md` +
+  `memory/mainnet_lockin_architecture.md`) happen pre-mainnet mint.

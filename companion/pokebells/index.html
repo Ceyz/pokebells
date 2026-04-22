@@ -253,6 +253,27 @@
   }
   .soon-box h2 { color: var(--fg); margin: 0 0 10px; }
   .soon-box .soon-icon { font-size: 42px; margin-bottom: 14px; }
+
+  /* --- Post-inscribe auto-register block --- */
+  .post-inscribe {
+    margin-top: 18px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--card) 92%, var(--accent) 8%);
+  }
+  .post-inscribe.hidden { display: none; }
+  .post-inscribe label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .post-inscribe input[type="text"] {
+    width: 100%;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -362,8 +383,11 @@
 <section id="mint-section">
   <h2>2 · Mint a captured Pokemon</h2>
   <p class="muted small">
-    Paste the capture JSON from the game below. This companion now verifies the basic schema plus the
-    anti-cheat provenance fields before it opens the Nintondo Inscriber.
+    Paste the capture JSON from the game below. The companion validates schema +
+    provenance, opens the Nintondo Inscriber, and once you paste the inscription id
+    returned by the Inscriber it auto-registers the capture with the official
+    indexer — no extra step. Schema 1.4 captures publish only commitments on-chain;
+    IVs and EVs are revealed by a separate op:"reveal" inscription (see below).
   </p>
 
   <label for="capture-json">Capture JSON from the game</label>
@@ -371,29 +395,90 @@
 
   <div class="row">
     <button id="validate-btn" class="secondary">Validate JSON</button>
-    <button id="mint-btn" disabled>Open Inscriber to mint</button>
+    <button id="mint-btn" disabled>Copy JSON + open Inscriber</button>
     <span id="mint-cost" class="pill warn hidden">cost: 1 $POKEBALL (post-Phase 8)</span>
   </div>
 
   <div id="validation-result"></div>
-</section>
 
-<section id="register-section">
-  <h2>3 · Register the inscription with the official indexer</h2>
-  <p class="muted small">
-    After the Nintondo Inscriber confirms the mint, copy the returned inscription id
-    and paste it below. The indexer re-fetches the on-chain content, re-validates it,
-    and stores the capture so it appears in the Trainer / Pokedex / Leaderboard tabs.
-    Captures not registered here still exist on-chain but are invisible to the official UIs.
-  </p>
+  <!-- Post-inscribe step: user pastes the returned inscription id and the
+       companion automatically registers it with the indexer + offers the
+       op:"reveal" flow. Hidden until a validated JSON is ready. -->
+  <div id="post-inscribe" class="post-inscribe hidden">
+    <label for="register-inscription-id">Inscription ID returned by the Inscriber</label>
+    <input type="text" id="register-inscription-id"
+           placeholder="e.g. eef1cf1566701fc5854c7f8afb695cc2ad52dda9599a7a574e3bc3cd317d5a71i0"
+           autocomplete="off" spellcheck="false">
+    <div class="row">
+      <span id="register-status" class="muted small">Paste the id once the Inscriber confirms the mint — registration is automatic.</span>
+    </div>
+  </div>
 
-  <label for="register-inscription-id">Inscription ID (from Inscriber)</label>
-  <input type="text" id="register-inscription-id"
-         placeholder="e.g. eef1cf1566701fc5854c7f8afb695cc2ad52dda9599a7a574e3bc3cd317d5a71i0">
+  <!-- Reveal flow (appears once the capture is registered). Opens the
+       previously hidden IVs/EVs by publishing the op:"reveal" inscription
+       that the indexer cross-checks against the capture's commitments. -->
+  <div id="reveal-flow" class="post-inscribe hidden" style="margin-top: 24px;">
+    <h3 style="margin-top: 0; font-size: 14px;">3 · Reveal IVs + EVs on-chain</h3>
+    <p class="muted small" style="margin-bottom: 10px;">
+      The capture you just inscribed only committed to hashed IVs + hashed ram snapshot.
+      To show stats in Trainer / Pokedex / marketplace listings, inscribe the matching
+      op:"reveal". Preimage is stored in the game tab's IndexedDB; run the command below
+      there, then paste the reveal JSON here.
+    </p>
+    <details style="margin-bottom: 10px;">
+      <summary class="muted small" style="cursor: pointer;">How to generate the reveal JSON</summary>
+      <p class="muted small" style="margin: 8px 0;">
+        Open the game tab devtools console (F12) and run:
+      </p>
+      <pre id="reveal-instructions" style="padding: 8px; background: var(--card); border-radius: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all;">await window.pokebellsBuildReveal('&lt;capture_attestation&gt;', '&lt;capture_inscription_id&gt;');</pre>
+    </details>
 
-  <div class="row">
-    <button id="register-btn" type="button">Register with indexer</button>
-    <span id="register-status" class="muted small"></span>
+    <label for="reveal-json">Reveal JSON (from game tab)</label>
+    <textarea id="reveal-json" placeholder='{ "p": "pokebells", "op": "reveal", ... }' rows="6"></textarea>
+    <div class="row">
+      <button id="reveal-validate-btn" class="secondary">Validate reveal</button>
+      <button id="reveal-mint-btn" disabled>Copy reveal + open Inscriber</button>
+      <span id="reveal-validation-status" class="muted small"></span>
+    </div>
+
+    <div id="reveal-post-inscribe" class="post-inscribe hidden" style="margin-top: 12px;">
+      <label for="reveal-inscription-id">Reveal inscription ID returned by the Inscriber</label>
+      <input type="text" id="reveal-inscription-id"
+             placeholder="e.g. abcdef0123...i0" autocomplete="off" spellcheck="false">
+      <div class="row">
+        <span id="reveal-register-status" class="muted small">Paste the reveal id — auto-registers with the indexer.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Save-snapshot flow: paste save JSON generated by the game tab's
+       "Sync save to chain" button, inscribe, auto-register. Portable across
+       devices that connect with the same wallet. -->
+  <div id="save-flow" class="post-inscribe" style="margin-top: 24px;">
+    <h3 style="margin-top: 0; font-size: 14px;">4 · Save game to chain (optional)</h3>
+    <p class="muted small" style="margin-bottom: 10px;">
+      Paste the save JSON from the game tab's "Sync save to chain" button. This
+      inscribes your whole 32 KB SRAM on-chain so you can continue on another
+      device by signing in with the same wallet. Each new inscription replaces
+      older ones in the indexer (by increasing save_version).
+    </p>
+
+    <label for="save-json">Save JSON (from game tab "Sync save to chain")</label>
+    <textarea id="save-json" placeholder='{ "p": "pokebells", "op": "save-snapshot", ... }' rows="5"></textarea>
+    <div class="row">
+      <button id="save-validate-btn" class="secondary">Validate save</button>
+      <button id="save-mint-btn" disabled>Copy save + open Inscriber</button>
+      <span id="save-validation-status" class="muted small"></span>
+    </div>
+
+    <div id="save-post-inscribe" class="post-inscribe hidden" style="margin-top: 12px;">
+      <label for="save-inscription-id">Save inscription ID returned by the Inscriber</label>
+      <input type="text" id="save-inscription-id"
+             placeholder="e.g. abcdef0123...i0" autocomplete="off" spellcheck="false">
+      <div class="row">
+        <span id="save-register-status" class="muted small">Paste the save id — auto-registers with the indexer.</span>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -871,20 +956,600 @@
     log(`validation OK: species=${parsed.species_id} level=${parsed.level} network=${parsed.capture_network}`);
   });
 
+  // Auto-register helper: the old Step 3 button is gone; as soon as the
+  // user pastes the returned inscription id we validate it, POST to the
+  // indexer, and surface the result inline. Runs on 'input' so paste from
+  // clipboard fires it without an extra click.
+  const setRegisterStatus = (text, tone) => {
+    const el = $("register-status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+
+  let registerInFlight = false;
+  const autoRegisterInscription = async (inscriptionId) => {
+    if (registerInFlight) return;
+    if (!/^[0-9a-f]{64}i\d+$/i.test(inscriptionId)) {
+      setRegisterStatus("Waiting for a valid inscription id (64 hex + 'iN').");
+      return;
+    }
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
+    registerInFlight = true;
+    setRegisterStatus("Registering with indexer…");
+    try {
+      const r = await fetch(`${INDEXER_BASE}/api/captures`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inscription_id: inscriptionId, network: networkKey }),
+      });
+      const payload = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const reason = payload?.reason ?? payload?.error ?? `HTTP ${r.status}`;
+        setRegisterStatus(`Rejected: ${reason}`, "err");
+        log(`register rejected: ${reason}`);
+      } else if (payload?.status === "duplicate") {
+        setRegisterStatus("Already registered — nothing to do.", "ok");
+        log(`register duplicate: ${inscriptionId}`);
+      } else {
+        setRegisterStatus(`Registered ✓ species ${payload?.species_id ?? "?"}.`, "ok");
+        log(`registered: ${inscriptionId} species=${payload?.species_id}`);
+        trainerHasLoaded = false;
+      }
+    } catch (e) {
+      setRegisterStatus(`Request failed: ${e.message ?? e}`, "err");
+      log(`register request failed: ${e.message ?? e}`);
+    } finally {
+      registerInFlight = false;
+    }
+  };
+
+  // --- Auto-detect polling helper ---
+  //
+  // After "Open Inscriber" the user normally had to paste the returned id
+  // manually. Now we poll the Nintondo wallet extension's inscription list
+  // (window.nintondo.getInscriptions) every 5s for up to 3 min. When a new
+  // inscription appears whose content matches the expected attestation (or
+  // ref_attestation for reveals), we auto-fill the paste input and fire
+  // the existing auto-register flow.
+  //
+  // Why this works: the capture JSON the user is about to inscribe contains
+  // a unique `attestation` hex. Once Nintondo confirms the inscription, the
+  // wallet's getInscriptions() lists it. We fetch each new inscription's
+  // content via bells-*-content.nintondo.io, match by attestation, and
+  // have the id without the user doing anything.
+  //
+  // Falls back gracefully: if getInscriptions is absent / fails / returns
+  // nothing within the timeout, the paste input stays visible.
+
+  const POLL_INTERVAL_MS = 5000;
+  const POLL_TIMEOUT_MS = 180000;  // 3 minutes
+
+  const CONTENT_BASES_POLL = {
+    "bells-mainnet": "https://bells-mainnet-content.nintondo.io/content/",
+    "bells-testnet": "https://bells-testnet-content.nintondo.io/content/",
+  };
+
+  const extractInscriptionIdsFromWallet = async () => {
+    if (typeof window.nintondo === "undefined") return [];
+    // Try every plausible method name + shape. Nintondo wallet has had both
+    // getInscriptions() (no args) and getInscriptions({ network }) variants.
+    const candidateCalls = [
+      () => window.nintondo.getInscriptions?.(),
+      () => window.nintondo.listInscriptions?.(),
+      () => window.nintondo.inscriptions?.(),
+    ];
+    for (const call of candidateCalls) {
+      try {
+        const result = await call();
+        if (!result) continue;
+        const list = Array.isArray(result) ? result
+          : Array.isArray(result?.inscriptions) ? result.inscriptions
+          : Array.isArray(result?.list) ? result.list
+          : [];
+        if (!list.length) continue;
+        // Extract the "<64hex>i<N>" inscription id from each entry (may be
+        // nested under different keys across wallet versions).
+        const ids = list.map((entry) => {
+          if (typeof entry === "string") return entry;
+          return entry?.inscription_id ?? entry?.inscriptionId ?? entry?.id ?? null;
+        }).filter((id) => typeof id === "string" && /^[0-9a-f]{64}i\d+$/i.test(id));
+        if (ids.length) return ids;
+      } catch {
+        // Method didn't exist or threw — keep trying.
+      }
+    }
+    return [];
+  };
+
+  const fetchInscriptionContent = async (inscriptionId, networkKey) => {
+    const base = CONTENT_BASES_POLL[networkKey];
+    if (!base) return null;
+    try {
+      const r = await fetch(`${base}${encodeURIComponent(inscriptionId)}`, { cache: "no-cache" });
+      if (!r.ok) return null;
+      const text = await r.text();
+      try { return JSON.parse(text); }
+      catch { return null; }
+    } catch { return null; }
+  };
+
+  // Generic poller. Returns the inscription id whose content matches
+  // predicate(parsed), or null on timeout.
+  const pollForInscriptionMatch = async ({
+    networkKey,
+    initialSeenIds,
+    predicate,
+    onStatus,
+  }) => {
+    const started = Date.now();
+    const seen = new Set(initialSeenIds ?? []);
+    while (Date.now() - started < POLL_TIMEOUT_MS) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const remaining = Math.max(0, Math.floor((POLL_TIMEOUT_MS - (Date.now() - started)) / 1000));
+      onStatus?.(`Scanning wallet inscriptions… (auto, ${remaining}s left)`);
+
+      const current = await extractInscriptionIdsFromWallet();
+      const fresh = current.filter((id) => !seen.has(id));
+      for (const id of fresh) {
+        seen.add(id);
+        const parsed = await fetchInscriptionContent(id, networkKey);
+        if (parsed && predicate(parsed)) {
+          return id;
+        }
+      }
+    }
+    return null;
+  };
+
   $("mint-btn").addEventListener("click", async () => {
     if (!validatedJson) {
       log("mint aborted: no validated JSON");
       return;
     }
+    let parsedCapture = null;
+    try { parsedCapture = JSON.parse(validatedJson); } catch {}
+    const expectedAttestation = typeof parsedCapture?.attestation === "string"
+      ? parsedCapture.attestation.toLowerCase() : null;
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
     try {
       await navigator.clipboard.writeText(validatedJson);
       log("capture JSON copied to clipboard - opening Inscriber");
     } catch (e) {
       log(`clipboard failed (paste manually): ${e.message}`);
     }
+
+    // Snapshot the wallet's current inscriptions BEFORE opening the tab so
+    // we can distinguish "just inscribed" from old inscriptions.
+    const before = await extractInscriptionIdsFromWallet();
+
     window.open(INSCRIBER_BASE, "_blank", "noopener");
-    log("Inscriber opened in new tab - paste the JSON there and sign with your wallet to mint");
+    log("Inscriber opened. Auto-detecting the inscription id — no paste needed if your wallet exposes getInscriptions.");
+
+    // Reveal the post-inscribe block so the user has a place to paste the
+    // id manually if auto-detect fails.
+    const postBlock = $("post-inscribe");
+    if (postBlock) {
+      postBlock.classList.remove("hidden");
+      const idField = $("register-inscription-id");
+      if (idField) {
+        idField.value = "";
+        idField.focus({ preventScroll: true });
+      }
+      setRegisterStatus("Auto-detecting via wallet… (or paste manually to bypass)");
+    }
+
+    // Start the poller. If a match is found, fill the input and fire the
+    // same auto-register pipeline as a manual paste.
+    if (expectedAttestation) {
+      pollForInscriptionMatch({
+        networkKey,
+        initialSeenIds: before,
+        predicate: (parsed) => (
+          parsed?.p === "pokebells"
+          && parsed?.op === "capture"
+          && String(parsed?.attestation ?? "").toLowerCase() === expectedAttestation
+        ),
+        onStatus: (msg) => setRegisterStatus(msg),
+      }).then((foundId) => {
+        if (foundId) {
+          const idField = $("register-inscription-id");
+          if (idField && !idField.value.trim()) {
+            idField.value = foundId;
+            idField.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          log(`auto-detected capture inscription: ${foundId}`);
+        } else {
+          setRegisterStatus("Auto-detect timed out — paste the id manually.");
+        }
+      }).catch((e) => {
+        log(`auto-detect poll failed: ${e.message ?? e}`);
+      });
+    }
   });
+
+  // Wire the auto-register to the id input. Debounce trivially: fire on
+  // 'input' once the typed / pasted value matches the id shape. Also fire
+  // on 'change' (blur) for users who type slowly.
+  const registerIdField = $("register-inscription-id");
+  let lastRegisteredCaptureId = null;
+  let lastRegisteredCaptureAttestation = null;
+  if (registerIdField) {
+    const tryRegisterFromField = () => {
+      const value = registerIdField.value.trim();
+      if (/^[0-9a-f]{64}i\d+$/i.test(value)) {
+        autoRegisterInscription(value).then(() => {
+          // Surface the reveal flow once the capture is successfully indexed.
+          lastRegisteredCaptureId = value;
+          try {
+            const parsed = JSON.parse(validatedJson ?? "{}");
+            lastRegisteredCaptureAttestation = parsed.attestation ?? null;
+            if (parsed.schema_version === "1.4" && lastRegisteredCaptureAttestation) {
+              const revealBlock = $("reveal-flow");
+              if (revealBlock) revealBlock.classList.remove("hidden");
+              const pre = $("reveal-instructions");
+              if (pre) {
+                pre.textContent = `await window.pokebellsBuildReveal('${lastRegisteredCaptureAttestation}', '${value}');`;
+              }
+            }
+          } catch { /* v1.3 legacy or bad JSON — no reveal flow */ }
+        });
+      }
+    };
+    registerIdField.addEventListener("input", tryRegisterFromField);
+    registerIdField.addEventListener("change", tryRegisterFromField);
+    registerIdField.addEventListener("paste", () => setTimeout(tryRegisterFromField, 0));
+  }
+
+  // -------- Reveal flow (op:"reveal" inscription) --------
+  const setRevealValidationStatus = (text, tone) => {
+    const el = $("reveal-validation-status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+  const setRevealRegisterStatus = (text, tone) => {
+    const el = $("reveal-register-status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+
+  let validatedRevealJson = null;
+
+  $("reveal-validate-btn")?.addEventListener("click", () => {
+    validatedRevealJson = null;
+    $("reveal-mint-btn").disabled = true;
+
+    const raw = $("reveal-json").value.trim();
+    if (!raw) {
+      setRevealValidationStatus("Paste the reveal JSON generated by the game tab.", "err");
+      return;
+    }
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) {
+      setRevealValidationStatus(`Invalid JSON: ${e.message}`, "err");
+      return;
+    }
+    if (parsed?.p !== "pokebells" || parsed?.op !== "reveal") {
+      setRevealValidationStatus('Expected {"p":"pokebells","op":"reveal",...}', "err");
+      return;
+    }
+    if (parsed.schema_version !== "1.4") {
+      setRevealValidationStatus(`Reveal schema_version must equal 1.4 (got ${parsed.schema_version})`, "err");
+      return;
+    }
+    if (!/^[0-9a-f]{64}i\d+$/i.test(parsed.ref ?? "")) {
+      setRevealValidationStatus("reveal.ref must be the capture inscription id.", "err");
+      return;
+    }
+    if (!/^[0-9a-f]{64}$/i.test(parsed.ivs_salt_hex ?? "")) {
+      setRevealValidationStatus("reveal.ivs_salt_hex must be 64-char hex.", "err");
+      return;
+    }
+    const ivs = parsed.ivs ?? {};
+    for (const key of ["atk", "def", "spe", "spd"]) {
+      if (!Number.isInteger(ivs[key]) || ivs[key] < 0 || ivs[key] > 15) {
+        setRevealValidationStatus(`reveal.ivs.${key} must be integer 0..15.`, "err");
+        return;
+      }
+    }
+    validatedRevealJson = raw;
+    $("reveal-mint-btn").disabled = false;
+    setRevealValidationStatus(
+      `Reveal OK — species=${parsed.ivs.atk + parsed.ivs.def + parsed.ivs.spe + parsed.ivs.spd}/60 IV total, ${parsed.shiny ? "SHINY" : "not shiny"}. Copy + inscribe.`,
+      "ok",
+    );
+  });
+
+  $("reveal-mint-btn")?.addEventListener("click", async () => {
+    if (!validatedRevealJson) return;
+    let parsedReveal = null;
+    try { parsedReveal = JSON.parse(validatedRevealJson); } catch {}
+    const expectedRef = typeof parsedReveal?.ref === "string" ? parsedReveal.ref.toLowerCase() : null;
+    const expectedSalt = typeof parsedReveal?.ivs_salt_hex === "string"
+      ? parsedReveal.ivs_salt_hex.toLowerCase() : null;
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
+    try {
+      await navigator.clipboard.writeText(validatedRevealJson);
+      log("reveal JSON copied to clipboard - opening Inscriber");
+    } catch (e) {
+      log(`reveal clipboard failed (paste manually): ${e.message}`);
+    }
+
+    const before = await extractInscriptionIdsFromWallet();
+    window.open(INSCRIBER_BASE, "_blank", "noopener");
+
+    const postBlock = $("reveal-post-inscribe");
+    if (postBlock) {
+      postBlock.classList.remove("hidden");
+      const idField = $("reveal-inscription-id");
+      if (idField) {
+        idField.value = "";
+        idField.focus({ preventScroll: true });
+      }
+      setRevealRegisterStatus("Auto-detecting via wallet… (or paste manually to bypass)");
+    }
+
+    // Same auto-detect pattern as captures: poll wallet inscriptions every
+    // 5s, match by ref + salt (both unique to this reveal), auto-paste when
+    // found.
+    if (expectedRef && expectedSalt) {
+      pollForInscriptionMatch({
+        networkKey,
+        initialSeenIds: before,
+        predicate: (parsed) => (
+          parsed?.p === "pokebells"
+          && parsed?.op === "reveal"
+          && String(parsed?.ref ?? "").toLowerCase() === expectedRef
+          && String(parsed?.ivs_salt_hex ?? "").toLowerCase() === expectedSalt
+        ),
+        onStatus: (msg) => setRevealRegisterStatus(msg),
+      }).then((foundId) => {
+        if (foundId) {
+          const idField = $("reveal-inscription-id");
+          if (idField && !idField.value.trim()) {
+            idField.value = foundId;
+            idField.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          log(`auto-detected reveal inscription: ${foundId}`);
+        } else {
+          setRevealRegisterStatus("Auto-detect timed out — paste the reveal id manually.");
+        }
+      }).catch((e) => {
+        log(`reveal auto-detect poll failed: ${e.message ?? e}`);
+      });
+    }
+  });
+
+  let revealRegisterInFlight = false;
+  const autoRegisterReveal = async (revealInscriptionId) => {
+    if (revealRegisterInFlight) return;
+    if (!/^[0-9a-f]{64}i\d+$/i.test(revealInscriptionId)) {
+      setRevealRegisterStatus("Waiting for a valid inscription id.");
+      return;
+    }
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
+    revealRegisterInFlight = true;
+    setRevealRegisterStatus("Registering reveal with indexer…");
+    try {
+      const r = await fetch(`${INDEXER_BASE}/api/reveals`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inscription_id: revealInscriptionId, network: networkKey }),
+      });
+      const payload = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const reason = payload?.reason ?? payload?.error ?? `HTTP ${r.status}`;
+        setRevealRegisterStatus(`Rejected: ${reason}`, "err");
+        log(`reveal register rejected: ${reason}`);
+      } else if (payload?.status === "duplicate") {
+        setRevealRegisterStatus("Already registered — nothing to do.", "ok");
+      } else {
+        setRevealRegisterStatus(
+          `Revealed ✓ IV total ${payload?.iv_total ?? "?"}${payload?.shiny ? " ★ SHINY" : ""}.`,
+          "ok",
+        );
+        log(`reveal registered: ${revealInscriptionId} iv_total=${payload?.iv_total}`);
+        trainerHasLoaded = false;
+      }
+    } catch (e) {
+      setRevealRegisterStatus(`Request failed: ${e.message ?? e}`, "err");
+      log(`reveal register request failed: ${e.message ?? e}`);
+    } finally {
+      revealRegisterInFlight = false;
+    }
+  };
+
+  const revealIdField = $("reveal-inscription-id");
+  if (revealIdField) {
+    const tryRegisterRevealFromField = () => {
+      const value = revealIdField.value.trim();
+      if (/^[0-9a-f]{64}i\d+$/i.test(value)) {
+        autoRegisterReveal(value);
+      }
+    };
+    revealIdField.addEventListener("input", tryRegisterRevealFromField);
+    revealIdField.addEventListener("change", tryRegisterRevealFromField);
+    revealIdField.addEventListener("paste", () => setTimeout(tryRegisterRevealFromField, 0));
+  }
+
+  // -------- Save flow (op:"save-snapshot") --------
+  const setSaveValidationStatus = (text, tone) => {
+    const el = $("save-validation-status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+  const setSaveRegisterStatus = (text, tone) => {
+    const el = $("save-register-status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
+  };
+
+  let validatedSaveJson = null;
+
+  $("save-validate-btn")?.addEventListener("click", () => {
+    validatedSaveJson = null;
+    $("save-mint-btn").disabled = true;
+
+    const raw = $("save-json").value.trim();
+    if (!raw) {
+      setSaveValidationStatus("Paste the save JSON from the game tab.", "err");
+      return;
+    }
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) {
+      setSaveValidationStatus(`Invalid JSON: ${e.message}`, "err");
+      return;
+    }
+    if (parsed?.p !== "pokebells" || parsed?.op !== "save-snapshot") {
+      setSaveValidationStatus('Expected {"p":"pokebells","op":"save-snapshot",...}', "err");
+      return;
+    }
+    if (parsed.save_scheme !== "base64:raw-sram-32k:v1") {
+      setSaveValidationStatus(`save_scheme must be base64:raw-sram-32k:v1 (got ${parsed.save_scheme})`, "err");
+      return;
+    }
+    if (!Number.isInteger(parsed.save_version) || parsed.save_version < 1) {
+      setSaveValidationStatus("save_version must be positive integer.", "err");
+      return;
+    }
+    if (!/^[0-9a-f]{64}$/i.test(parsed.game_rom_sha256 ?? "")) {
+      setSaveValidationStatus("game_rom_sha256 must be 64-char hex.", "err");
+      return;
+    }
+    if (!/^[0-9a-f]{64}$/i.test(parsed.sram_sha256 ?? "")) {
+      setSaveValidationStatus("sram_sha256 must be 64-char hex.", "err");
+      return;
+    }
+    validatedSaveJson = raw;
+    $("save-mint-btn").disabled = false;
+    setSaveValidationStatus(
+      `Save OK — v${parsed.save_version}, ${parsed.sram_byte_length ?? 32768} bytes. Copy + inscribe.`,
+      "ok",
+    );
+  });
+
+  $("save-mint-btn")?.addEventListener("click", async () => {
+    if (!validatedSaveJson) return;
+    let parsedSave = null;
+    try { parsedSave = JSON.parse(validatedSaveJson); } catch {}
+    const expectedSramSha = typeof parsedSave?.sram_sha256 === "string"
+      ? parsedSave.sram_sha256.toLowerCase() : null;
+    const expectedVersion = parsedSave?.save_version ?? null;
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
+    try {
+      await navigator.clipboard.writeText(validatedSaveJson);
+      log("save JSON copied to clipboard - opening Inscriber");
+    } catch (e) {
+      log(`save clipboard failed (paste manually): ${e.message}`);
+    }
+
+    const before = await extractInscriptionIdsFromWallet();
+    window.open(INSCRIBER_BASE, "_blank", "noopener");
+
+    const postBlock = $("save-post-inscribe");
+    if (postBlock) {
+      postBlock.classList.remove("hidden");
+      const idField = $("save-inscription-id");
+      if (idField) {
+        idField.value = "";
+        idField.focus({ preventScroll: true });
+      }
+      setSaveRegisterStatus("Auto-detecting via wallet… (or paste manually to bypass)");
+    }
+
+    if (expectedSramSha && expectedVersion) {
+      pollForInscriptionMatch({
+        networkKey,
+        initialSeenIds: before,
+        predicate: (parsed) => (
+          parsed?.p === "pokebells"
+          && parsed?.op === "save-snapshot"
+          && String(parsed?.sram_sha256 ?? "").toLowerCase() === expectedSramSha
+          && parsed?.save_version === expectedVersion
+        ),
+        onStatus: (msg) => setSaveRegisterStatus(msg),
+      }).then((foundId) => {
+        if (foundId) {
+          const idField = $("save-inscription-id");
+          if (idField && !idField.value.trim()) {
+            idField.value = foundId;
+            idField.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          log(`auto-detected save inscription: ${foundId}`);
+        } else {
+          setSaveRegisterStatus("Auto-detect timed out — paste the save id manually.");
+        }
+      }).catch((e) => {
+        log(`save auto-detect poll failed: ${e.message ?? e}`);
+      });
+    }
+  });
+
+  let saveRegisterInFlight = false;
+  const autoRegisterSave = async (saveInscriptionId) => {
+    if (saveRegisterInFlight) return;
+    if (!/^[0-9a-f]{64}i\d+$/i.test(saveInscriptionId)) {
+      setSaveRegisterStatus("Waiting for a valid inscription id.");
+      return;
+    }
+    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
+      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
+
+    saveRegisterInFlight = true;
+    setSaveRegisterStatus("Registering save with indexer…");
+    try {
+      const r = await fetch(`${INDEXER_BASE}/api/saves`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inscription_id: saveInscriptionId, network: networkKey }),
+      });
+      const payload = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const reason = payload?.reason ?? payload?.error ?? `HTTP ${r.status}`;
+        setSaveRegisterStatus(`Rejected: ${reason}`, "err");
+        log(`save register rejected: ${reason}`);
+      } else if (payload?.status === "duplicate") {
+        setSaveRegisterStatus("Already registered — nothing to do.", "ok");
+      } else {
+        setSaveRegisterStatus(`Save v${payload?.save_version ?? "?"} registered ✓`, "ok");
+        log(`save registered: ${saveInscriptionId} v${payload?.save_version}`);
+      }
+    } catch (e) {
+      setSaveRegisterStatus(`Request failed: ${e.message ?? e}`, "err");
+      log(`save register request failed: ${e.message ?? e}`);
+    } finally {
+      saveRegisterInFlight = false;
+    }
+  };
+
+  const saveIdField = $("save-inscription-id");
+  if (saveIdField) {
+    const tryRegisterSaveFromField = () => {
+      const value = saveIdField.value.trim();
+      if (/^[0-9a-f]{64}i\d+$/i.test(value)) {
+        autoRegisterSave(value);
+      }
+    };
+    saveIdField.addEventListener("input", tryRegisterSaveFromField);
+    saveIdField.addEventListener("change", tryRegisterSaveFromField);
+    saveIdField.addEventListener("paste", () => setTimeout(tryRegisterSaveFromField, 0));
+  }
 
   refreshProvider();
   const lastAddr = localStorage.getItem(STORAGE_KEY_LAST_ADDR);
@@ -1078,50 +1743,10 @@
     loadTrainerCaptures();
   });
 
-  // -------- Register minted capture with indexer --------
-  const setRegisterStatus = (text, tone) => {
-    const el = $("register-status");
-    el.textContent = text;
-    el.className = tone === "err" ? "pill err" : tone === "ok" ? "pill ok" : "muted small";
-  };
-
-  $("register-btn").addEventListener("click", async () => {
-    const inscriptionId = $("register-inscription-id").value.trim();
-    if (!/^[0-9a-f]{64}i\d+$/i.test(inscriptionId)) {
-      setRegisterStatus("inscription id must look like <64hex>i<N>", "err");
-      return;
-    }
-    const networkKey = normalizeNetworkKey(getSelectedNetworkConfig().connectNetwork)
-      ?? (getSelectedNetworkConfig() === NETWORK_CONFIG.bellsMainnet ? "bells-mainnet" : "bells-testnet");
-
-    setRegisterStatus("registering…");
-    $("register-btn").disabled = true;
-    try {
-      const r = await fetch(`${INDEXER_BASE}/api/captures`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ inscription_id: inscriptionId, network: networkKey }),
-      });
-      const payload = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        const reason = payload?.reason ?? payload?.error ?? `HTTP ${r.status}`;
-        setRegisterStatus(`rejected: ${reason}`, "err");
-        log(`register rejected: ${reason}`);
-      } else if (payload?.status === "duplicate") {
-        setRegisterStatus("already registered — nothing to do", "ok");
-        log(`register duplicate: ${inscriptionId}`);
-      } else {
-        setRegisterStatus(`registered ✓ species ${payload?.species_id}, IV total ${payload?.iv_total}`, "ok");
-        log(`registered: ${inscriptionId} species=${payload?.species_id}`);
-        trainerHasLoaded = false; // force refresh next time Trainer tab opens
-      }
-    } catch (e) {
-      setRegisterStatus(`request failed: ${e.message ?? e}`, "err");
-      log(`register request failed: ${e.message ?? e}`);
-    } finally {
-      $("register-btn").disabled = false;
-    }
-  });
+  // -------- Post-inscribe register handler moved inline to the mint flow.
+  // The Step 3 "Register with indexer" form was removed in favor of auto-
+  // registration triggered by pasting the inscription id into the
+  // #register-inscription-id field (see the mint-btn handler above).
 })();
 </script>
 

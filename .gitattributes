@@ -1,0 +1,39 @@
+# Force LF line endings on every file that gets inscribed on-chain OR
+# whose sha256 must match across clones. Without this, Git's default
+# core.autocrlf=true on Windows rewrites CRLF on checkout — breaking the
+# reproducibility guarantee that "clone the repo, build, inscribe" yields
+# bytes that match the canonical on-chain inscription.
+#
+# Root rule: every text file in this repo is LF-only in the working tree.
+* text=auto eol=lf
+
+# Safety nets for specific file types we KNOW ship on-chain. Redundant
+# with the * line above but kept explicit so someone scanning this file
+# can see the intent + add to it for new inscribable types.
+*.html  text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.sql   text eol=lf
+*.toml  text eol=lf
+*.txt   text eol=lf
+*.asm   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Binary files — never convert, never diff as text. ROM + chunks +
+# sprites + emulator wasm. Most are gitignored (see .gitignore) but
+# mark them binary so an accidental "git add -f" doesn't mangle bytes.
+*.gb    binary
+*.gbc   binary
+*.sav   binary
+*.bps   binary
+*.ips   binary
+*.bin   binary
+*.wasm  binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary

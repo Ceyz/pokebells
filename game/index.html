@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PokeBells Phase 1</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101313;
+      --panel: #171c1c;
+      --panel-2: #1d2524;
+      --line: #2f3b39;
+      --text: #e6f0ec;
+      --muted: #8b9a95;
+      --ok: #72d572;
+      --warn: #e3b55d;
+      --bad: #ff7a7a;
+      --accent: #5fc4ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .layout {
+      display: grid;
+      gap: 16px;
+      padding: 16px;
+    }
+
+    .band {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .band h1,
+    .band h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    .subline {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    .status-item {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 88px;
+    }
+
+    .status-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .status-value {
+      margin-top: 6px;
+      font-size: 14px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .shell {
+      display: grid;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .screen-wrap {
+      position: relative;
+      width: min(100%, 720px);
+      aspect-ratio: 160 / 144;
+      background: #000;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .screen-wrap:fullscreen {
+      width: 100vw;
+      height: 100vh;
+      aspect-ratio: auto;
+      border: 0;
+      border-radius: 0;
+      display: grid;
+      place-items: center;
+      background: #020303;
+    }
+
+    .screen-wrap:fullscreen #screen {
+      width: min(100vw, calc(100vh * 160 / 144));
+      height: min(100vh, calc(100vw * 144 / 160));
+    }
+
+    #screen {
+      width: 100%;
+      height: 100%;
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+      background: rgba(0, 0, 0, 0.5);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .overlay.hidden { display: none; }
+
+    /* Nametag rendered above the player sprite in the overworld. Positioned
+       at pixel coords inside the 160x144 emulator canvas and scaled with the
+       canvas (percent of screen-wrap). Hidden during battles, splash, and
+       cutscenes where the player sprite isn't at the standard spawn tile. */
+    .player-nametag {
+      position: absolute;
+      left: 50%;
+      top: 42%;
+      transform: translate(-50%, -100%);
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      color: #fff;
+      padding: 1px 5px;
+      font: 600 clamp(8px, 1.2vw, 12px)/1 monospace;
+      border-radius: 3px;
+      pointer-events: none;
+      white-space: nowrap;
+      z-index: 5;
+      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.8);
+    }
+    .player-nametag.hidden { display: none; }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+      align-items: center;
+    }
+
+    button,
+    input,
+    select { font: inherit; }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #253030;
+      color: var(--text);
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    button:hover { border-color: var(--accent); }
+    button:disabled { cursor: default; opacity: 0.55; }
+
+    .manifest-input {
+      min-width: min(100%, 360px);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+    }
+
+    .team-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .team-card {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 120px;
+    }
+
+    .team-title {
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .team-meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      margin-top: 16px;
+    }
+
+    .section-head:first-of-type {
+      margin-top: 0;
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .section-meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .empty-card {
+      opacity: 0.72;
+      border-style: dashed;
+    }
+
+    .box-list {
+      display: grid;
+      gap: 18px;
+      margin-top: 12px;
+    }
+
+    .box-block {
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .box-block:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .gamepad {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      margin-top: 16px;
+      align-items: center;
+    }
+
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, 44px);
+      grid-template-rows: repeat(3, 44px);
+      gap: 4px;
+    }
+
+    .pad-button {
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #202929;
+      color: var(--text);
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+    }
+
+    .pad-button.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: #14313b;
+    }
+
+    .meta-buttons {
+      display: grid;
+      gap: 8px;
+    }
+
+    .meta-buttons .pad-button {
+      min-width: 84px;
+      min-height: 38px;
+      padding: 0 12px;
+    }
+
+    .ab-buttons {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .ab-buttons .pad-button {
+      width: 52px;
+      height: 52px;
+      border-radius: 52px;
+    }
+
+    .log {
+      margin: 0;
+      padding: 12px;
+      min-height: 280px;
+      max-height: 420px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0d1111;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .accent { color: var(--accent); }
+    .capture { color: #ffb0ff; }
+
+    .data-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    .data-item {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 88px;
+    }
+
+    .data-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .data-value {
+      margin-top: 6px;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    @media (min-width: 1100px) {
+      .shell {
+        grid-template-columns: minmax(0, 760px) minmax(320px, 1fr);
+      }
+    }
+
+    /* ── Battle HUD overlay ── */
+    .battle-hud {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      background: rgba(0, 0, 0, 0.78);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 11px;
+      color: #e6f0ec;
+      min-width: 94px;
+      pointer-events: none;
+      line-height: 1.4;
+      z-index: 10;
+    }
+
+    .battle-hud.hidden { display: none; }
+
+    .hud-species {
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      white-space: nowrap;
+      margin-bottom: 3px;
+    }
+
+    .hud-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 4px;
+      font-size: 10px;
+    }
+
+    .hud-lbl { color: #8b9a95; }
+
+    .hud-hp-track {
+      height: 3px;
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 2px;
+      margin: 2px 0 5px;
+      overflow: hidden;
+    }
+
+    .hud-hp-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: #72d572;
+      transition: width 0.08s linear;
+    }
+
+    .hud-hp-fill.hp-yellow { background: #e3b55d; }
+    .hud-hp-fill.hp-red    { background: #ff7a7a; }
+
+    .hud-catch-row {
+      display: flex;
+      align-items: baseline;
+      gap: 3px;
+    }
+
+    .hud-catch-pct {
+      font-size: 18px;
+      font-weight: 700;
+      color: #5fc4ff;
+      line-height: 1;
+    }
+
+    .hud-catch-lbl {
+      font-size: 9px;
+      color: #8b9a95;
+    }
+
+    .hud-status {
+      font-size: 9px;
+      color: #e3b55d;
+      margin-top: 1px;
+      min-height: 11px;
+    }
+
+    /* ── Modals + busy overlay ── */
+    .modal,
+    .busy-overlay {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(5, 8, 8, 0.72);
+      z-index: 40;
+      padding: 16px;
+    }
+
+    .modal.hidden,
+    .busy-overlay.hidden { display: none; }
+
+    .modal-card {
+      width: min(100%, 440px);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    }
+
+    .modal-card h3 {
+      margin: 0 0 10px;
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    .modal-lines {
+      display: grid;
+      gap: 6px;
+      margin: 12px 0 16px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .modal-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--text);
+    }
+
+    .modal-line .modal-key {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .modal-line.modal-warn { color: var(--warn); }
+    .modal-line.modal-bad { color: var(--bad); }
+
+    .modal-actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      margin-top: 14px;
+    }
+
+    .modal-actions button[data-primary="true"] {
+      background: #14313b;
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .modal-actions button[data-danger="true"] {
+      border-color: var(--bad);
+      color: var(--bad);
+    }
+
+    .busy-card {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      min-width: 240px;
+    }
+
+    .busy-spinner {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid rgba(95, 196, 255, 0.3);
+      border-top-color: var(--accent);
+      animation: busy-spin 0.9s linear infinite;
+      flex-shrink: 0;
+    }
+
+    .busy-text {
+      font-size: 13px;
+      color: var(--text);
+    }
+
+    @keyframes busy-spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <section class="band">
+      <h1>PokeBells Phase 1</h1>
+      <p class="subline">Manifest-driven ROM loading, chunk reassembly, durable cache when available, then boot via binjgb.</p>
+      <div class="controls">
+        <input id="manifest-url" class="manifest-input" type="text" value="manifest.local.json" aria-label="Manifest URL">
+        <button id="load-manifest">Load manifest</button>
+        <button id="clear-cache">Clear cache</button>
+        <button id="copy-durable-url">Copy durable URL</button>
+        <button id="open-companion">Open companion</button>
+      </div>
+    </section>
+
+    <section class="band">
+      <h2>Phase 1 Status</h2>
+        <div class="status-grid">
+          <div class="status-item"><div class="status-label">Manifest</div><div id="status-manifest" class="status-value">Waiting</div></div>
+          <div class="status-item"><div class="status-label">ROM</div><div id="status-rom" class="status-value">Waiting</div></div>
+          <div class="status-item"><div class="status-label">Cache</div><div id="status-cache" class="status-value">Cold</div></div>
+          <div class="status-item"><div class="status-label">Storage Mode</div><div id="status-storage" class="status-value">Checking</div></div>
+          <div class="status-item"><div class="status-label">Runtime</div><div id="status-runtime" class="status-value">Waiting</div></div>
+          <div class="status-item"><div class="status-label">Emulator</div><div id="status-emulator" class="status-value">Idle</div></div>
+          <div class="status-item"><div class="status-label">Capture Watch</div><div id="status-watch" class="status-value">Idle</div></div>
+          <div class="status-item"><div class="status-label">Page Mode</div><div id="status-page-mode" class="status-value">Checking</div></div>
+        </div>
+      </section>
+
+    <section class="band">
+      <h2>Live RAM</h2>
+      <div class="data-grid">
+        <div class="data-item"><div class="data-label">Team Count</div><div id="live-team-count" class="data-value">--</div></div>
+        <div class="data-item"><div class="data-label">Battle Status</div><div id="live-battle-status" class="data-value">--</div></div>
+        <div class="data-item"><div class="data-label">Enemy HP</div><div id="live-enemy-hp" class="data-value">--</div></div>
+        <div class="data-item"><div class="data-label">Enemy Catch Rate</div><div id="live-catch-rate" class="data-value">--</div></div>
+        <div class="data-item"><div class="data-label">Catch Chance</div><div id="live-catch-chance" class="data-value">--</div></div>
+        <div class="data-item"><div class="data-label">Map / Flags</div><div id="live-context" class="data-value">--</div></div>
+      </div>
+    </section>
+
+    <section class="band">
+      <h2>Last Capture Payload</h2>
+      <pre id="capture-json" class="log">No capture yet.</pre>
+    </section>
+
+    <section class="band">
+      <h2>Wallet</h2>
+      <div class="controls">
+        <select id="wallet-adapter-select" class="manifest-input" aria-label="Wallet adapter">
+          <option value="mock">Mock offline adapter</option>
+          <option value="nintondo">Nintondo extension</option>
+        </select>
+        <button id="load-dev-save">Load dev save</button>
+        <button id="wallet-connect">Connect wallet</button>
+        <button id="wallet-probe">Probe provider</button>
+        <button id="wallet-sign-test">Sign test message</button>
+        <button id="wallet-mint">Mint last capture</button>
+        <button id="wallet-sync-pc">Sync wallet to PC</button>
+        <button id="wallet-reset">Reset adapter</button>
+      </div>
+      <div class="status-grid">
+        <div class="status-item"><div class="status-label">Adapter</div><div id="wallet-adapter" class="status-value">Mock offline adapter</div></div>
+        <div class="status-item"><div class="status-label">Availability</div><div id="wallet-availability" class="status-value">Ready</div></div>
+        <div class="status-item"><div class="status-label">Wallet</div><div id="wallet-address" class="status-value">Disconnected</div></div>
+        <div class="status-item"><div class="status-label">Balance</div><div id="wallet-balance" class="status-value">--</div></div>
+        <div class="status-item"><div class="status-label">Network</div><div id="wallet-network" class="status-value">bells-testnet</div></div>
+        <div class="status-item"><div class="status-label">Provider API</div><div id="wallet-provider-path" class="status-value">--</div></div>
+        <div class="status-item"><div class="status-label">Provider Ver</div><div id="wallet-provider-version" class="status-value">--</div></div>
+        <div class="status-item"><div class="status-label">Account Name</div><div id="wallet-account-name" class="status-value">--</div></div>
+        <div class="status-item"><div class="status-label">Signature</div><div id="wallet-signature-status" class="status-value">None</div></div>
+        <div class="status-item"><div class="status-label">Owned Pokemon</div><div id="wallet-owned-count" class="status-value">0</div></div>
+        <div class="status-item"><div class="status-label">Party</div><div id="wallet-party-count" class="status-value">0 / 6</div></div>
+        <div class="status-item"><div class="status-label">Boxed</div><div id="wallet-boxed-count" class="status-value">0</div></div>
+        <div class="status-item"><div class="status-label">Boxes</div><div id="wallet-box-count" class="status-value">1</div></div>
+        <div class="status-item"><div class="status-label">Last Mint</div><div id="wallet-last-mint" class="status-value">None</div></div>
+        <div class="status-item"><div class="status-label">Mint Flow</div><div id="wallet-mint-phase" class="status-value">Idle</div></div>
+        <div class="status-item"><div class="status-label">Mint Quote</div><div id="wallet-mint-quote" class="status-value">--</div></div>
+        <div class="status-item"><div class="status-label">Mint Tx</div><div id="wallet-mint-tx" class="status-value">--</div></div>
+        <div class="status-item"><div class="status-label">PC Sync</div><div id="wallet-pc-sync" class="status-value">Waiting for a save file.</div></div>
+        <div class="status-item"><div class="status-label">$POKEBALL cooldown</div><div id="wallet-pokeball" class="status-value">Ready (stub)</div></div>
+      </div>
+      <div class="section-head">
+        <div class="section-title">Active Party</div>
+        <div id="wallet-party-meta" class="section-meta">0 / 6 slots</div>
+      </div>
+      <div id="owned-party" class="team-grid"></div>
+      <div class="section-head">
+        <div class="section-title">PC Boxes</div>
+        <div id="wallet-box-meta" class="section-meta">0 boxed across 1 box</div>
+      </div>
+      <div id="owned-boxes" class="box-list"></div>
+      <div class="section-head">
+        <div class="section-title">Provider Diagnostics</div>
+        <div class="section-meta">Read-only probe + optional signature challenge</div>
+      </div>
+      <pre id="wallet-provider-log" class="log">No provider probe yet.</pre>
+      <pre id="owned-pokemon" class="log">No mock mints yet.</pre>
+    </section>
+
+    <section class="shell">
+      <section class="band">
+        <h2>Game</h2>
+        <div class="screen-wrap">
+          <canvas id="screen" width="160" height="144"></canvas>
+          <div id="player-nametag" class="player-nametag hidden">TRAINER</div>
+          <div id="battle-hud" class="battle-hud hidden">
+            <div id="hud-species" class="hud-species">---</div>
+            <div class="hud-row">
+              <span class="hud-lbl">HP</span>
+              <span id="hud-hp-text">--/--</span>
+            </div>
+            <div class="hud-hp-track">
+              <div id="hud-hp-fill" class="hud-hp-fill" style="width:0%"></div>
+            </div>
+            <div class="hud-catch-row">
+              <div id="hud-catch-pct" class="hud-catch-pct">--%</div>
+              <div class="hud-catch-lbl">catch</div>
+            </div>
+            <div id="hud-status" class="hud-status"></div>
+          </div>
+          <div id="screen-overlay" class="overlay">No ROM booted yet.</div>
+        </div>
+        <div class="controls">
+          <button id="reload-rom">Rebuild from manifest</button>
+          <button id="toggle-fullscreen">Fullscreen</button>
+          <button id="sync-save" disabled title="Save in-game first (Start→SAVE), then click to inscribe your save on-chain so it's portable across devices.">Sync save to chain</button>
+          <button id="restore-save" class="hidden" title="Restore a previously inscribed save from the chain.">Restore save from chain</button>
+        </div>
+        <div id="save-status" class="muted" style="font-size: 11px; margin-top: 6px;"></div>
+        <div class="gamepad">
+          <div class="dpad">
+            <div></div>
+            <div class="pad-button" data-key="up">Up</div>
+            <div></div>
+            <div class="pad-button" data-key="left">Left</div>
+            <div></div>
+            <div class="pad-button" data-key="right">Right</div>
+            <div></div>
+            <div class="pad-button" data-key="down">Down</div>
+            <div></div>
+          </div>
+          <div class="meta-buttons">
+            <div class="pad-button" data-key="select">Select</div>
+            <div class="pad-button" data-key="start">Start</div>
+          </div>
+          <div class="ab-buttons">
+            <div class="pad-button" data-key="b">B</div>
+            <div class="pad-button" data-key="a">A</div>
+          </div>
+        </div>
+        <p class="subline">Keyboard: arrows, Z/B, X/A, Enter/Start, Shift/Select.</p>
+      </section>
+
+      <section class="band">
+        <h2>Loader Log</h2>
+        <pre id="log" class="log"></pre>
+      </section>
+    </section>
+  </main>
+
+  <div id="mint-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mint-modal-title">
+    <div class="modal-card">
+      <h3 id="mint-modal-title">Confirm mint</h3>
+      <p class="subline" id="mint-modal-subtitle">Review the cost and the $POKEBALL cooldown before broadcasting.</p>
+      <div id="mint-modal-lines" class="modal-lines"></div>
+      <div class="modal-actions">
+        <button id="mint-modal-cancel">Cancel</button>
+        <button id="mint-modal-confirm" data-primary="true">Confirm mint</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="capture-handoff-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="capture-handoff-title">
+    <div class="modal-card">
+      <h3 id="capture-handoff-title">Pokemon captured</h3>
+      <p class="subline" id="capture-handoff-subtitle">The game is paused while you mint this capture from the companion.</p>
+      <div id="capture-handoff-lines" class="modal-lines"></div>
+      <div class="modal-actions">
+        <button id="capture-handoff-cancel" data-danger="true">Cancel mint</button>
+        <button id="capture-handoff-resume">Resume game</button>
+        <button id="capture-handoff-open" data-primary="true">Copy JSON + open companion</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="save-handoff-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="save-handoff-title">
+    <div class="modal-card">
+      <h3 id="save-handoff-title">Save game to chain</h3>
+      <p class="subline" id="save-handoff-subtitle">Game paused. Copy the save JSON and inscribe it from the companion — your save will be portable across devices that sign in with this wallet.</p>
+      <div id="save-handoff-lines" class="modal-lines"></div>
+      <div class="modal-actions">
+        <button id="save-handoff-cancel" data-danger="true">Cancel</button>
+        <button id="save-handoff-open" data-primary="true">Copy save JSON + open companion</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="busy-overlay" class="busy-overlay hidden" role="status" aria-live="polite">
+    <div class="busy-card">
+      <div class="busy-spinner"></div>
+      <div id="busy-text" class="busy-text">Working...</div>
+    </div>
+  </div>
+
+  <!--
+    Bootloader loads every game module dynamically. In local dev it uses
+    relative paths (./capture-core.mjs, ./shell.js, ...). When served from
+    a Nintondo inscription host (or when the URL carries ?manifest=<id>),
+    it fetches a `p:pokebells-manifest` inscription and dynamic-imports
+    each module from its own inscription. This makes the root inscription
+    a bootloader — patch-to-fix post-mainnet is just re-minting the manifest
+    and referenced child modules, no new root needed.
+    See memory: mainnet_lockin_architecture.md for the contract.
+  -->
+  <!--
+    Wallet bridge client shim. Loaded BEFORE boot.js so `window.nintondo`
+    is set up by the time shell.js reads it via wallet-adapter.mjs.
+    Only installs when: (1) we're inside an iframe, AND (2) no wallet is
+    already injected on this origin. This is the case when the game runs
+    from the Nintondo content host — the extension targets nintondo.io
+    but NOT bells-*-content.nintondo.io subdomains. An outer "wallet host"
+    page (bellforge.app, a community mirror, or user localhost) provides
+    window.nintondo and relays every call via postMessage.
+    See companion/pokebells/play-bridge.html for the reference host impl.
+    Zero-op when already running on a wallet-injected origin (localhost,
+    bellforge.app, etc.) — the proxy stays uninstalled and the wallet
+    adapter talks to the real extension directly.
+  -->
+  <script>
+  (function installWalletBridgeClient() {
+    if (typeof window === 'undefined') return;
+    if (window.nintondo) return;                 // wallet already injected
+    if (window.parent === window) return;         // not in an iframe, nothing to bridge to
+    var pending = new Map();
+    var nextId = 1;
+    var eventListeners = new Map();               // event name -> Set<handler>
+    function rpc(method, args) {
+      return new Promise(function (resolve, reject) {
+        var id = nextId++;
+        pending.set(id, { resolve: resolve, reject: reject });
+        try {
+          window.parent.postMessage({ __pokebells_bridge: 1, type: 'nintondo:call', method: method, args: args, id: id }, '*');
+        } catch (err) {
+          pending.delete(id);
+          reject(err);
+        }
+      });
+    }
+    window.addEventListener('message', function (ev) {
+      var data = ev && ev.data;
+      if (!data || data.__pokebells_bridge !== 1) return;
+      if (data.type === 'nintondo:result' && pending.has(data.id)) {
+        var entry = pending.get(data.id);
+        pending.delete(data.id);
+        if (data.error) entry.reject(new Error(String(data.error)));
+        else entry.resolve(data.result);
+      } else if (data.type === 'nintondo:event') {
+        var set = eventListeners.get(data.event);
+        if (set) set.forEach(function (fn) { try { fn(data.payload); } catch (_) {} });
+      }
+    });
+    // Minimal proxy API: every property access returns a function that
+    // forwards to the host. Covers getAccount/connect/getNetwork/getVersion/
+    // signMessage/getInscriptions/etc. Host dispatches to the real
+    // window.nintondo[method](...args). `on`/`off` route to event bus.
+    var bridge = new Proxy({ __pokebells_bridge__: true }, {
+      get: function (target, prop) {
+        if (prop === '__pokebells_bridge__') return true;
+        if (prop === 'on') {
+          return function (event, handler) {
+            if (!eventListeners.has(event)) eventListeners.set(event, new Set());
+            eventListeners.get(event).add(handler);
+            rpc('__subscribe__', [event]);
+          };
+        }
+        if (prop === 'off') {
+          return function (event, handler) {
+            if (eventListeners.has(event)) eventListeners.get(event).delete(handler);
+          };
+        }
+        return function () {
+          var args = Array.prototype.slice.call(arguments);
+          return rpc(String(prop), args);
+        };
+      },
+    });
+    Object.defineProperty(window, 'nintondo', { value: bridge, configurable: true, writable: false });
+    // Announce readiness so the host can send an initial state snapshot.
+    try { window.parent.postMessage({ __pokebells_bridge: 1, type: 'nintondo:client-ready' }, '*'); } catch (_) {}
+  })();
+  </script>
+  <script type="module" src="boot.js"></script>
+</body>
+</html>

@@ -1,20 +1,39 @@
 // PokeBells indexer — CF Worker entry.
 //
 // Model: register-on-mint. The companion POSTs { inscription_id, network }
-// after a user signs and inscribes a capture. The worker fetches the content
-// from bells-*-content.nintondo.io, runs the validator (schema + attestation
-// + block-hash existence), and on success writes a row to D1. Reads are
-// served from D1 with pagination.
+// after a user signs and inscribes a capture (or reveal). The worker fetches
+// the content from bells-*-content.nintondo.io, runs the validator (schema +
+// attestation + block-hash existence + dedupe), and on success writes a row
+// to D1.
 //
-// No chain scanning: Nintondo has no public inscription-listing API, and
-// captures minted outside the companion flow are by-design excluded from the
-// official collection (same anti-cheat policy as the on-chain indexer spec).
+// Supported ops:
+//   POST /api/captures  { inscription_id, network }  — register a capture
+//   POST /api/reveals   { inscription_id, network }  — register a reveal;
+//     triggers validator cross-check against the matching capture and
+//     copies revealed IVs/EVs/shiny onto the capture row.
+//   GET  /api/captures/:id  — lookup
+//   GET  /api/trainer/:owner
+//   GET  /api/pokedex?species=N
+//   GET  /api/leaderboard?by=iv_total|count
+//   GET  /api/stats
+//
+// Dedupe defenses on POST /api/captures:
+//   - inscription_id already in captures         → 200 {status:duplicate}
+//   - capture_content_sha256 collision elsewhere → 422 content_duplicate
+//   - ram_snapshot_hash collision elsewhere      → 422 snapshot_replay
+//
+// No chain scanning: Nintondo has no public inscription-listing API. Captures
+// minted outside the companion flow are by-design excluded from the official
+// collection (same policy as the on-chain spec).
 
-import { fetchAndValidateInscription } from "./validator.js";
+import { fetchAndValidateInscription, validateReveal, validateSaveSnapshot } from "./validator.js";
 import {
-  insertCapture, logIngestion, captureExists, captureById,
+  insertCapture, insertReveal, applyRevealToCapture, logIngestion,
+  captureExists, revealExists, captureById,
+  findContentSha256Conflict, findRamSnapshotHashConflict,
   capturesByOwner, capturesBySpecies,
   leaderboardByIvTotal, leaderboardByCount, networkStats,
+  insertSave, saveExists, findLatestSaveVersion, latestSaveByWallet,
 } from "./db.js";
 
 const CORS_HEADERS = {
@@ -38,7 +57,6 @@ function json(body, init = {}) {
 }
 
 function clientIpPrefix(request) {
-  // /24 (IPv4) or /48 (IPv6) prefix, used only for coarse rate-limit grouping.
   const ip = request.headers.get("cf-connecting-ip") ?? "";
   if (!ip) return null;
   if (ip.includes(":")) {
@@ -46,17 +64,6 @@ function clientIpPrefix(request) {
   }
   const parts = ip.split(".");
   return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.0/24` : null;
-}
-
-async function getOwnerFromInscription(inscriptionId, network, env) {
-  // Nintondo's content host returns the inscription content body, not metadata
-  // like owner. To get the owner we'd scrape the inscription detail page.
-  // Shipping without owner-verification for tonight — the capture JSON's
-  // `signed_in_wallet` is used as the owner for query purposes; an on-chain
-  // owner cross-check can be added later once we know which API endpoint
-  // Nintondo exposes (none found as of 2026-04-20 probe).
-  // TODO: fetch /bells/inscriptions/<id> RSC stream to extract on-chain owner.
-  return null;
 }
 
 async function handlePostCapture(request, env) {
@@ -78,38 +85,261 @@ async function handlePostCapture(request, env) {
   const ipPrefix = clientIpPrefix(request);
 
   if (await captureExists(env, inscriptionId)) {
-    await logIngestion(env, inscriptionId, network, "duplicate", null, ipPrefix);
+    await logIngestion(env, inscriptionId, "capture", network, "duplicate", null, ipPrefix);
     return json({ ok: true, status: "duplicate", inscription_id: inscriptionId });
   }
 
   const result = await fetchAndValidateInscription(inscriptionId, network, env);
   if (!result.ok) {
-    await logIngestion(env, inscriptionId, network, "invalid", `${result.stage}: ${result.reason}`, ipPrefix);
+    await logIngestion(env, inscriptionId, "capture", network, "invalid", `${result.stage}: ${result.reason}`, ipPrefix);
     return json(
       { ok: false, error: "validation_failed", stage: result.stage, reason: result.reason },
       { status: 422 },
     );
   }
 
-  const onChainOwner = await getOwnerFromInscription(inscriptionId, network, env);
-  const ownerAddress = onChainOwner ?? result.normalized.signed_in_wallet;
+  if (result.kind === "reveal") {
+    await logIngestion(env, inscriptionId, "capture", network, "invalid", "wrong_op_use_reveals_endpoint", ipPrefix);
+    return json(
+      { ok: false, error: "wrong_op", reason: "inscription is op:reveal — POST /api/reveals instead" },
+      { status: 422 },
+    );
+  }
+
+  const n = result.normalized;
+
+  // Dedupe checks run after validation so we don't index cheat attempts:
+  //   content_sha256 dupe = same capture body re-inscribed (money print)
+  //   ram_snapshot_hash dupe = same emulator state re-used (save replay)
+  const contentConflict = await findContentSha256Conflict(env, n.capture_content_sha256, inscriptionId);
+  if (contentConflict) {
+    await logIngestion(env, inscriptionId, "capture", network, "invalid",
+      `content_duplicate of ${contentConflict}`, ipPrefix);
+    return json(
+      { ok: false, error: "content_duplicate", conflicts_with: contentConflict },
+      { status: 422 },
+    );
+  }
+  const snapshotConflict = await findRamSnapshotHashConflict(env, n.ram_snapshot_hash, inscriptionId);
+  if (snapshotConflict) {
+    await logIngestion(env, inscriptionId, "capture", network, "invalid",
+      `snapshot_replay of ${snapshotConflict}`, ipPrefix);
+    return json(
+      { ok: false, error: "snapshot_replay", conflicts_with: snapshotConflict },
+      { status: 422 },
+    );
+  }
+
+  const ownerAddress = n.signed_in_wallet;
 
   try {
-    await insertCapture(env, inscriptionId, ownerAddress, result.normalized, result.raw);
-    await logIngestion(env, inscriptionId, network, "ok", null, ipPrefix);
+    await insertCapture(env, inscriptionId, ownerAddress, n, result.raw);
+    await logIngestion(env, inscriptionId, "capture", network, "ok", null, ipPrefix);
   } catch (e) {
-    await logIngestion(env, inscriptionId, network, "error", e.message, ipPrefix);
+    await logIngestion(env, inscriptionId, "capture", network, "error", e.message, ipPrefix);
     return json({ ok: false, error: "db_error", reason: e.message }, { status: 500 });
   }
 
   return json({
     ok: true,
     status: "registered",
+    kind: "capture",
     inscription_id: inscriptionId,
     owner_address: ownerAddress,
-    species_id: result.normalized.species_id,
-    iv_total: result.normalized.iv_total,
+    species_id: n.species_id,
+    schema_version: n.schema_version,
+    needs_reveal: n.schema_version === "1.4",
   });
+}
+
+async function handlePostReveal(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ ok: false, error: "invalid_json" }, { status: 400 }); }
+
+  const inscriptionId = typeof body?.inscription_id === "string"
+    ? body.inscription_id.trim() : "";
+  const network = typeof body?.network === "string" ? body.network.trim() : "";
+
+  if (!INSCRIPTION_ID_RE.test(inscriptionId)) {
+    return json({ ok: false, error: "bad_inscription_id" }, { status: 400 });
+  }
+  if (network !== "bells-mainnet" && network !== "bells-testnet") {
+    return json({ ok: false, error: "bad_network" }, { status: 400 });
+  }
+
+  const ipPrefix = clientIpPrefix(request);
+
+  if (await revealExists(env, inscriptionId)) {
+    await logIngestion(env, inscriptionId, "reveal", network, "duplicate", null, ipPrefix);
+    return json({ ok: true, status: "duplicate", inscription_id: inscriptionId });
+  }
+
+  const fetched = await fetchAndValidateInscription(inscriptionId, network, env);
+  if (!fetched.ok) {
+    await logIngestion(env, inscriptionId, "reveal", network, "invalid", `${fetched.stage}: ${fetched.reason}`, ipPrefix);
+    return json(
+      { ok: false, error: "validation_failed", stage: fetched.stage, reason: fetched.reason },
+      { status: 422 },
+    );
+  }
+  if (fetched.kind !== "reveal") {
+    await logIngestion(env, inscriptionId, "reveal", network, "invalid", "wrong_op_expected_reveal", ipPrefix);
+    return json(
+      { ok: false, error: "wrong_op", reason: `expected op:reveal, got op:${fetched.parsed?.op}` },
+      { status: 422 },
+    );
+  }
+
+  const revealParsed = fetched.parsed;
+  const captureRefId = typeof revealParsed.ref === "string" ? revealParsed.ref.trim() : "";
+  if (!INSCRIPTION_ID_RE.test(captureRefId)) {
+    await logIngestion(env, inscriptionId, "reveal", network, "invalid", "bad_ref", ipPrefix);
+    return json(
+      { ok: false, error: "bad_ref", reason: "reveal.ref must be the capture inscription id" },
+      { status: 422 },
+    );
+  }
+
+  const captureRow = await captureById(env, captureRefId);
+  if (!captureRow) {
+    await logIngestion(env, inscriptionId, "reveal", network, "invalid", "capture_not_registered", ipPrefix);
+    return json(
+      { ok: false, error: "capture_not_registered", reason: "register the capture inscription first" },
+      { status: 422 },
+    );
+  }
+
+  const check = await validateReveal(revealParsed, captureRow, env);
+  if (!check.ok) {
+    await logIngestion(env, inscriptionId, "reveal", network, "invalid", `${check.stage}: ${check.reason}`, ipPrefix);
+    return json(
+      { ok: false, error: "reveal_invalid", stage: check.stage, reason: check.reason },
+      { status: 422 },
+    );
+  }
+
+  try {
+    await insertReveal(env, inscriptionId, network, check.normalized, fetched.raw);
+    await applyRevealToCapture(env, inscriptionId, check.normalized);
+    await logIngestion(env, inscriptionId, "reveal", network, "ok", null, ipPrefix);
+  } catch (e) {
+    await logIngestion(env, inscriptionId, "reveal", network, "error", e.message, ipPrefix);
+    return json({ ok: false, error: "db_error", reason: e.message }, { status: 500 });
+  }
+
+  return json({
+    ok: true,
+    status: "revealed",
+    kind: "reveal",
+    inscription_id: inscriptionId,
+    capture_inscription_id: captureRefId,
+    iv_total: check.normalized.iv_total,
+    shiny: check.normalized.shiny,
+  });
+}
+
+async function handlePostSave(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ ok: false, error: "invalid_json" }, { status: 400 }); }
+
+  const inscriptionId = typeof body?.inscription_id === "string"
+    ? body.inscription_id.trim() : "";
+  const network = typeof body?.network === "string" ? body.network.trim() : "";
+
+  if (!INSCRIPTION_ID_RE.test(inscriptionId)) {
+    return json({ ok: false, error: "bad_inscription_id" }, { status: 400 });
+  }
+  if (network !== "bells-mainnet" && network !== "bells-testnet") {
+    return json({ ok: false, error: "bad_network" }, { status: 400 });
+  }
+
+  const ipPrefix = clientIpPrefix(request);
+
+  if (await saveExists(env, inscriptionId)) {
+    await logIngestion(env, inscriptionId, "save", network, "duplicate", null, ipPrefix);
+    return json({ ok: true, status: "duplicate", inscription_id: inscriptionId });
+  }
+
+  const fetched = await fetchAndValidateInscription(inscriptionId, network, env);
+  if (!fetched.ok) {
+    await logIngestion(env, inscriptionId, "save", network, "invalid", `${fetched.stage}: ${fetched.reason}`, ipPrefix);
+    return json(
+      { ok: false, error: "validation_failed", stage: fetched.stage, reason: fetched.reason },
+      { status: 422 },
+    );
+  }
+  if (fetched.kind !== "save-snapshot") {
+    await logIngestion(env, inscriptionId, "save", network, "invalid", "wrong_op_expected_save_snapshot", ipPrefix);
+    return json(
+      { ok: false, error: "wrong_op", reason: `expected op:save-snapshot, got op:${fetched.parsed?.op}` },
+      { status: 422 },
+    );
+  }
+
+  const check = await validateSaveSnapshot(fetched.parsed, env);
+  if (!check.ok) {
+    await logIngestion(env, inscriptionId, "save", network, "invalid", `${check.stage}: ${check.reason}`, ipPrefix);
+    return json(
+      { ok: false, error: "save_invalid", stage: check.stage, reason: check.reason },
+      { status: 422 },
+    );
+  }
+
+  const n = check.normalized;
+  if (n.network !== network) {
+    await logIngestion(env, inscriptionId, "save", network, "invalid", "network_mismatch", ipPrefix);
+    return json({ ok: false, error: "network_mismatch" }, { status: 422 });
+  }
+
+  // Monotonic save_version check: the inscribed save_version must be >
+  // the latest seen for this wallet+rom+network. Rejects downgrade
+  // attacks where someone re-inscribes an older version to roll back.
+  const latest = await findLatestSaveVersion(env, n.signed_in_wallet, n.game_rom_sha256, n.network);
+  if (n.save_version <= latest) {
+    await logIngestion(env, inscriptionId, "save", network, "invalid",
+      `stale_save_version ${n.save_version} <= ${latest}`, ipPrefix);
+    return json(
+      { ok: false, error: "stale_save_version", latest_known: latest },
+      { status: 422 },
+    );
+  }
+
+  try {
+    await insertSave(env, inscriptionId, n, fetched.raw);
+    await logIngestion(env, inscriptionId, "save", network, "ok", null, ipPrefix);
+  } catch (e) {
+    await logIngestion(env, inscriptionId, "save", network, "error", e.message, ipPrefix);
+    return json({ ok: false, error: "db_error", reason: e.message }, { status: 500 });
+  }
+
+  return json({
+    ok: true,
+    status: "saved",
+    kind: "save-snapshot",
+    inscription_id: inscriptionId,
+    wallet: n.signed_in_wallet,
+    save_version: n.save_version,
+  });
+}
+
+async function handleGetSave(env, url, pathWallet) {
+  const wallet = decodeURIComponent(pathWallet);
+  if (!wallet || wallet.length > 128) {
+    return json({ ok: false, error: "bad_address" }, { status: 400 });
+  }
+  const romSha = url.searchParams.get("rom_sha");
+  const network = url.searchParams.get("network");
+  if (!/^[0-9a-f]{64}$/i.test(romSha ?? "")) {
+    return json({ ok: false, error: "rom_sha required (64 hex)" }, { status: 400 });
+  }
+  if (network !== "bells-mainnet" && network !== "bells-testnet") {
+    return json({ ok: false, error: "network required" }, { status: 400 });
+  }
+  const save = await latestSaveByWallet(env, wallet, romSha.toLowerCase(), network);
+  if (!save) return json({ ok: true, save: null });
+  return json({ ok: true, save });
 }
 
 async function handleGetTrainer(env, url, pathOwner) {
@@ -126,8 +356,8 @@ async function handleGetTrainer(env, url, pathOwner) {
 
 async function handleGetPokedex(env, url) {
   const speciesId = Number.parseInt(url.searchParams.get("species") ?? "", 10);
-  if (!Number.isInteger(speciesId) || speciesId < 1 || speciesId > 151) {
-    return json({ ok: false, error: "species query param required (1..151)" }, { status: 400 });
+  if (!Number.isInteger(speciesId) || speciesId < 1 || speciesId > 251) {
+    return json({ ok: false, error: "species query param required (1..251)" }, { status: 400 });
   }
   const network = url.searchParams.get("network");
   const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
@@ -175,7 +405,7 @@ export default {
     }
 
     if (url.pathname === "/" || url.pathname === "/health") {
-      return json({ ok: true, service: "pokebells-indexer", version: "v1" });
+      return json({ ok: true, service: "pokebells-indexer", version: "v1.4" });
     }
 
     if (url.pathname === "/api/stats" && request.method === "GET") {
@@ -185,6 +415,12 @@ export default {
     if (url.pathname === "/api/captures" && request.method === "POST") {
       return handlePostCapture(request, env);
     }
+    if (url.pathname === "/api/reveals" && request.method === "POST") {
+      return handlePostReveal(request, env);
+    }
+    if (url.pathname === "/api/saves" && request.method === "POST") {
+      return handlePostSave(request, env);
+    }
 
     if (request.method === "GET") {
       const trainerMatch = url.pathname.match(/^\/api\/trainer\/([^/]+)\/?$/);
@@ -193,6 +429,9 @@ export default {
       if (url.pathname === "/api/pokedex") return handleGetPokedex(env, url);
 
       if (url.pathname === "/api/leaderboard") return handleGetLeaderboard(env, url);
+
+      const saveMatch = url.pathname.match(/^\/api\/saves\/([^/]+)\/?$/);
+      if (saveMatch) return handleGetSave(env, url, saveMatch[1]);
 
       const captureMatch = url.pathname.match(/^\/api\/captures\/([^/]+)\/?$/);
       if (captureMatch) return handleGetCapture(env, captureMatch[1]);

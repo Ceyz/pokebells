@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PokeBells — Play (wallet bridge)</title>
+  <style>
+    :root {
+      --bg: #0f1014;
+      --card: #17191f;
+      --fg: #f4f5f7;
+      --muted: #90949c;
+      --line: #262933;
+      --accent: #f6a621;
+    }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+    header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    header h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+    header .pill { font-size: 11px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
+    header .pill.ok { color: #72d572; border-color: color-mix(in srgb, #72d572 40%, var(--line)); }
+    header .pill.err { color: #ff7a7a; border-color: color-mix(in srgb, #ff7a7a 40%, var(--line)); }
+    header input[type="text"] { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-family: ui-monospace, monospace; font-size: 11px; min-width: 420px; }
+    header label { font-size: 11px; color: var(--muted); }
+    #game-frame { width: 100%; height: calc(100vh - 50px); border: 0; display: block; background: #020303; }
+    .center { margin: 80px auto; max-width: 520px; padding: 24px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; text-align: center; }
+    .center code { background: rgba(255,255,255,0.07); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+    button { background: var(--accent); border: 0; color: #000; padding: 6px 14px; font-weight: 600; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🔔 PokeBells Play Bridge</h1>
+  <span id="wallet-pill" class="pill">wallet: detecting…</span>
+  <span id="bridge-pill" class="pill">bridge: waiting…</span>
+  <label for="game-src-input">Game URL</label>
+  <input type="text" id="game-src-input" />
+  <button id="reload-btn" class="secondary" type="button">Reload</button>
+  <a id="docs-link" href="https://github.com/Ceyz/pokebells/blob/main/OPEN_SOURCE.md" target="_blank" rel="noopener" style="margin-left: auto; color: var(--muted); font-size: 11px;">What is this?</a>
+</header>
+<iframe id="game-frame" title="PokeBells game" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups"></iframe>
+
+<div id="no-wallet-card" class="center" style="display:none">
+  <h2 style="margin-top:0">Wallet not detected</h2>
+  <p>This page is a wallet bridge. Install the <a href="https://nintondo.io" target="_blank" rel="noopener">Nintondo wallet extension</a> and reload. Once the extension injects <code>window.nintondo</code> on this page, the bridge relays every call from the embedded game — so the game keeps working even when loaded from a Nintondo content host where the extension isn't injected.</p>
+  <p class="muted" style="font-size:12px; color:var(--muted)">This file is a generic template: anyone can host it (Cloudflare Pages, GitHub Pages, a local <code>python -m http.server</code>, a community mirror, …) and point users at their URL via <code>?bridge=&lt;their-url&gt;</code>. No server logic, no state — just a postMessage relay to the browser's wallet extension.</p>
+</div>
+
+<script>
+/*
+ * PokeBells wallet-bridge host.
+ *
+ * The PokeBells game can be loaded from any content host (including
+ * bells-{network}-content.nintondo.io/content/<id>). On content hosts
+ * the Nintondo wallet extension does NOT inject window.nintondo — the
+ * extension's content_scripts match nintondo.io but typically not the
+ * *-content.nintondo.io subdomains. To keep the game usable on the
+ * canonical on-chain URL, we need a "bridge" page on an origin where
+ * the extension DOES inject (nintondo.io itself, bellforge.app, a
+ * user's localhost, a community mirror).
+ *
+ * This page is that bridge. It:
+ *   1. Has window.nintondo available (you open it from a wallet-enabled
+ *      origin).
+ *   2. Embeds the game in an iframe (default: bells-mainnet-content/...
+ *      configurable via ?game=<url>).
+ *   3. Installs a postMessage listener that translates every
+ *      {type:'nintondo:call', method, args, id} request from the iframe
+ *      into a call on window.nintondo[method](...args), then posts the
+ *      result back as {type:'nintondo:result', id, result|error}.
+ *   4. Forwards accountsChanged / networkChanged events the wallet emits,
+ *      as {type:'nintondo:event', event, payload} so the game can refresh.
+ *
+ * Deploy: copy this single HTML file to any static host. No build step,
+ * no dependencies. Update the DEFAULT_GAME_URL below or leave it as the
+ * mainnet bootloader inscription URL after mint. Users bookmark this
+ * URL; wallet state is theirs, game bytes are on-chain.
+ */
+(function () {
+  'use strict';
+  var MAGIC = '__pokebells_bridge';
+
+  // ----- Resolve the game URL (URL param > default) -----
+  // Default to the mainnet root inscription once minted. For testnet or
+  // local dev, pass ?game=http://localhost:8765/game/index.html or
+  // ?game=https://bells-testnet-content.nintondo.io/content/<root_id>.
+  var DEFAULT_GAME_URL = 'https://bells-mainnet-content.nintondo.io/content/REPLACE_ME_AFTER_ROOT_MINT';
+  var params = new URLSearchParams(window.location.search);
+  var gameUrl = params.get('game') || DEFAULT_GAME_URL;
+
+  var frame = document.getElementById('game-frame');
+  var input = document.getElementById('game-src-input');
+  input.value = gameUrl;
+  frame.src = gameUrl;
+
+  document.getElementById('reload-btn').addEventListener('click', function () {
+    var next = input.value.trim();
+    if (!next) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('game', next);
+    window.location.href = url.toString();
+  });
+
+  // ----- Wallet presence -----
+  var pill = document.getElementById('wallet-pill');
+  var bridgePill = document.getElementById('bridge-pill');
+  function refreshWalletPill() {
+    if (window.nintondo) {
+      pill.textContent = 'wallet: injected ✓';
+      pill.className = 'pill ok';
+      document.getElementById('no-wallet-card').style.display = 'none';
+    } else {
+      pill.textContent = 'wallet: NOT injected';
+      pill.className = 'pill err';
+      document.getElementById('no-wallet-card').style.display = 'block';
+    }
+  }
+  refreshWalletPill();
+  // Wallet extension may inject after DOMContentLoaded; poll briefly.
+  var pollStart = Date.now();
+  var pollInterval = setInterval(function () {
+    refreshWalletPill();
+    if (window.nintondo || Date.now() - pollStart > 5000) clearInterval(pollInterval);
+  }, 200);
+
+  // ----- Bridge ----
+  function reply(source, origin, msg) {
+    try { source.postMessage(msg, origin); }
+    catch (_) { try { source.postMessage(msg, '*'); } catch (__) {} }
+  }
+
+  var eventSubs = new Map(); // source window -> Set<event>
+
+  function bindEventIfPossible(source, origin, eventName) {
+    // Wallet extensions expose events differently; we attempt addEventListener
+    // on window.nintondo + fall back to window-level messages. Subscribes
+    // once per source+event; subsequent subscribes are no-ops.
+    if (!window.nintondo) return;
+    var key = eventName;
+    var existing = eventSubs.get(source) || new Set();
+    if (existing.has(key)) return;
+    existing.add(key);
+    eventSubs.set(source, existing);
+    function handler(payload) {
+      reply(source, origin, { __pokebells_bridge: 1, type: 'nintondo:event', event: key, payload: payload });
+    }
+    try {
+      if (typeof window.nintondo.on === 'function') window.nintondo.on(eventName, handler);
+      else if (typeof window.nintondo.addEventListener === 'function') window.nintondo.addEventListener(eventName, handler);
+    } catch (_) {}
+  }
+
+  window.addEventListener('message', async function (ev) {
+    var data = ev.data;
+    if (!data || data[MAGIC] !== 1) return;
+    // Accept messages only from the iframe we loaded (basic origin gate).
+    if (ev.source !== frame.contentWindow) return;
+
+    if (data.type === 'nintondo:client-ready') {
+      bridgePill.textContent = 'bridge: connected ✓';
+      bridgePill.className = 'pill ok';
+      return;
+    }
+    if (data.type !== 'nintondo:call') return;
+
+    if (!window.nintondo) {
+      reply(ev.source, ev.origin, { __pokebells_bridge: 1, type: 'nintondo:result', id: data.id, error: 'wallet not injected on bridge origin' });
+      return;
+    }
+
+    var method = String(data.method);
+    var args = Array.isArray(data.args) ? data.args : [];
+
+    if (method === '__subscribe__') {
+      bindEventIfPossible(ev.source, ev.origin, String(args[0]));
+      reply(ev.source, ev.origin, { __pokebells_bridge: 1, type: 'nintondo:result', id: data.id, result: true });
+      return;
+    }
+
+    try {
+      var target = window.nintondo;
+      var fn = target[method];
+      if (typeof fn !== 'function') {
+        // Probe into a nested provider object (e.g., window.nintondo.provider.method)
+        if (target.provider && typeof target.provider[method] === 'function') {
+          fn = target.provider[method];
+          target = target.provider;
+        } else {
+          throw new Error('window.nintondo.' + method + ' is not a function');
+        }
+      }
+      var result = await fn.apply(target, args);
+      reply(ev.source, ev.origin, { __pokebells_bridge: 1, type: 'nintondo:result', id: data.id, result: result });
+    } catch (err) {
+      reply(ev.source, ev.origin, { __pokebells_bridge: 1, type: 'nintondo:result', id: data.id, error: err && err.message ? err.message : String(err) });
+    }
+  });
+})();
+</script>
+</body>
+</html>

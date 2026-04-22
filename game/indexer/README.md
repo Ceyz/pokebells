@@ -117,36 +117,62 @@ Future: the `p:pokebells-collection` inscription can declare a canonical
 on boot. That moves the fallback list on-chain and removes the need for a
 new shell inscription when adding mirrors. Not blocking v1 launch.
 
-## Endpoints
+## Endpoints (v1.4)
 
-All JSON, all CORS `*`, all read-only except `POST /api/captures`.
+All JSON, all CORS `*`, all read-only except the POST mutation endpoints.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/health` | `{ok:true, service, version}` |
-| GET | `/api/stats` | total / mainnet / testnet / shinies / trainers / species |
-| POST | `/api/captures` | body `{inscription_id, network}` — validates + stores |
-| GET | `/api/captures/<id>` | single capture by inscription id |
-| GET | `/api/trainer/<addr>` | `?network=&limit=&offset=` — captures owned |
-| GET | `/api/pokedex` | `?species=1..151&network=&limit=&offset=` — list all of one species |
-| GET | `/api/leaderboard` | `?by=iv_total\|count&network=&limit=` |
+| GET  | `/health` | `{ok:true, service, version: "v1.4"}` |
+| GET  | `/api/stats` | total / mainnet / testnet / shinies / revealed / trainers / species |
+| POST | `/api/captures` | body `{inscription_id, network}` — validates + dedupes + stores |
+| POST | `/api/reveals`  | body `{inscription_id, network}` — validates commitment preimage, copies IVs+EVs+shiny onto matching capture row |
+| POST | `/api/saves`    | body `{inscription_id, network}` — stores op:"save-snapshot", enforces monotonic save_version per (wallet, rom, network) |
+| GET  | `/api/captures/<id>` | single capture by inscription id |
+| GET  | `/api/trainer/<addr>` | `?network=&limit=&offset=` — captures owned |
+| GET  | `/api/pokedex` | `?species=1..251&network=&limit=&offset=` — list all of one species |
+| GET  | `/api/leaderboard` | `?by=iv_total\|count&network=&limit=` |
+| GET  | `/api/saves/<wallet>` | `?rom_sha=<hex>&network=` — latest save-snapshot metadata for cross-device restore |
 
 ## Validator stages
 
 `src/validator.js` is dependency-free (standard Web APIs only) so it runs
 unchanged on the Worker. Order, short-circuit on first failure:
 
-1. **schema** — `p:pokebells`, `op:capture`, species 1..151, level 1..100,
-   IV fields 0..15, spc vs spd collapsed to `iv_special`.
+1. **schema** — `p:pokebells`, `op:"capture"` supported at `schema_version`
+   `1.3` (legacy, plaintext IVs inline) or `1.4` (commit-reveal, IVs
+   hidden until a matching `op:"reveal"`). Species 1..251 (Gen 2), level
+   1..100. Under v1.4: `ivs`, `derived_ivs`, `evs`, `shiny`, `ram_snapshot`
+   MUST be null; `ivs_commitment` + `ram_snapshot_hash` must be 64-hex.
 2. **provenance** — block hash format, session sequence, signed wallet,
-   ram_snapshot base64 (decodes to 0x2000 bytes), attestation hex.
-3. **attestation** — recomputed `sha256(block_hash + ram + wallet + seq)`
-   matches the `attestation` field.
-4. **network** — block hash exists on the claimed network via
-   `/block/<hash>` on the corresponding electrs base.
+   `svbk_at_capture` byte, `attestation_scheme` in
+   {`v1`, `v1.1`, `v2`}.
+3. **attestation** — recomputed per scheme:
+   - **v1.1** `sha256(block_hash + raw_wram8k + svbk + wallet + seq)`
+   - **v2**   `sha256(block_hash + ram_snapshot_hash + svbk + wallet + seq + ivs_commitment)`
+4. **network** — block hash exists on the claimed network via `/block/<hash>`.
+5. **dedupe** (capture only) — `capture_content_sha256` collision elsewhere
+   → 422 `content_duplicate`; `ram_snapshot_hash` collision → 422
+   `snapshot_replay`.
+
+### Reveal validation (`op:"reveal"`)
+- `ref` resolves to a registered capture.
+- Decoded `ram_snapshot` bytes (32 KB) sha256 equals `capture.ram_snapshot_hash`.
+- `sha256(canonical(ivs) || hex_to_bytes(ivs_salt_hex))` equals `capture.ivs_commitment`.
+- On success, the capture row's IV + EV + shiny + `reveal_inscription_id`
+  fields are updated via `COALESCE` (first reveal wins; replays no-op).
+
+### Save-snapshot validation (`op:"save-snapshot"`)
+- `save_scheme` equals `base64:raw-sram-32k:v1`.
+- `sram` decodes to exactly 32 768 bytes.
+- `sha256(decoded bytes)` equals `sram_sha256`.
+- `save_version` strictly greater than any previously-indexed save for the
+  same `(signed_in_wallet, game_rom_sha256, network)` tuple. Downgrades
+  return 422 `stale_save_version` with `latest_known` in the response.
 
 Every attempt (ok, duplicate, invalid, error) is logged in
-`ingestion_log` with a /24 or /48 IP prefix for abuse detection.
+`ingestion_log` keyed by `kind` (`capture` / `reveal` / `save`) with a /24
+or /48 IP prefix for abuse detection.
 
 ## Schema changes
 
@@ -158,6 +184,16 @@ the D1 Console in the CF Dashboard.
 
 ## Future work
 
+- **`op:"update"` + `op:"evolve"` endpoints.** Schema + `buildUpdateRecord`
+  / `buildEvolveRecord` + `evolves` table already ship; the worker endpoints
+  are blocked on probing Bells `signMessage` format (see
+  `memory/nintondo_signmessage_format.md`) — without signature verification
+  anyone could spoof updates for any wallet.
+- **Wallet-derived AES-GCM encryption of `op:"save-snapshot"` payloads.**
+  Currently SRAM is inscribed in plaintext, readable on-chain by anyone.
+  v1.5 roadmap: encrypt with a key derived from
+  `wallet.signMessage('pokebells-save-v1:<wallet>')` + HKDF. Requires
+  signMessage probe too.
 - **Chain-scan fallback.** Scheduled trigger (`[triggers] crons`) that
   reconciles against any inscription-listing API Nintondo eventually ships
   (or RSC scraping as a stopgap). Catches captures missed when the
@@ -165,8 +201,22 @@ the D1 Console in the CF Dashboard.
 - **On-chain owner verification.** Currently we trust `signed_in_wallet`
   for ownership queries. Adding a lookup against Nintondo's inscription
   detail page lets us correct for secondary transfers.
-- **Sprite-match check.** Once the sprite pack inscription ids are known,
-  reject captures whose `nft_metadata.image` doesn't equal the canonical
-  sprite for `(species_id, shiny)`.
+- **Sprite-match check.** Reject captures whose `nft_metadata.image`
+  doesn't equal the canonical sprite for `(species_id, shiny)` once the
+  sprite-pack inscription ids are pinned in `p:pokebells-manifest`.
 - **Rate limiting.** `ingestion_log.client_ip_prefix` is recorded but not
   enforced; add a per-prefix-per-minute cap at the Worker layer.
+- **Encounter table + learnset legality** — reject captures whose
+  `(species, map, level)` tuple is not a legal Crystal wild encounter,
+  and captures whose moves aren't learnable at their level. Data
+  extraction from the pret/pokecrystal disasm remains TODO.
+
+## Bootstrap without GitHub
+
+Everything in this directory (worker.js, validator.js, db.js, schema.sql,
+package.json, wrangler.toml, README.md) can be packaged for on-chain
+inscription as a recovery path if GitHub ever disappears. Run
+`node tools/package-indexer-for-inscription.mjs` from the repo root to
+produce `tools/indexer-bundle/` + a manifest JSON ready to inscribe.
+See [`OPEN_SOURCE.md`](../../OPEN_SOURCE.md) for the full resilience
+model.

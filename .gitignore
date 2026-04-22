@@ -36,6 +36,7 @@ test-nintondo.html
 # One-shot dev tools (sprite pack generator, future extraction scripts).
 # Private by default; allowlist specific files here if/when ready to publish.
 tools/
+!tools/package-indexer-for-inscription.mjs
 
 # Phase 4.5 relay — transparent transport layer, safe to publish
 # (no ROM, no IP, pure WebSocket relay + signature verification)
@@ -52,6 +53,30 @@ game/indexer/.wrangler/
 !game/pbrp/
 !.github/workflows/cf-relay.yml
 !.github/workflows/indexer.yml
+
+# MIT-licensed Gen 2 game source (inscribed on-chain, needs to be public
+# for reproducibility + verification of the inscribed bytes). Keeps ROMs +
+# chunks + SRAMs + local HTTPS certs + emulator wasm private (covered by
+# the *.gb / *.gbc / game/chunks/ / *.pem rules at the top of this file).
+!game/index.html
+!game/boot.js
+!game/shell.js
+!game/capture-core.mjs
+!game/capture-core.test.mjs
+!game/gen2-species.mjs
+!game/gen2-species.test.mjs
+!game/gen2-pc-storage.mjs
+!game/wallet-adapter.mjs
+!game/wallet-adapter.test.mjs
+!game/signin-verify.test.mjs
+!game/manifest.template.json
+!game/manifest.local.json
+!game/manifest.testnet-template.json
+!game/inscription-plan.template.json
+!game/inscription-checklist.testnet.md
+!game/inscription-checklist.testnet.json
+!game/build-rom-manifest.mjs
+!game/CRYSTAL-MIGRATION-TODO.md
 
 # Synthesized by pages.yml at deploy — source of truth is game/pbrp/
 companion/pokebells/pbrp/
