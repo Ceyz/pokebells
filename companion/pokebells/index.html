@@ -469,14 +469,28 @@
     },
   };
   const INSCRIBER_BASE = "https://nintondo.io/inscriber";
-  // Indexer base URL. Override for dev via:
-  //   localStorage.setItem("pokebells.indexer_base", "https://<worker>.workers.dev");
-  // Default points at the custom domain that will be bound after the first
-  // Cloudflare Worker deploy + DNS setup. See game/indexer/README.md.
-  const INDEXER_BASE_DEFAULT = "https://indexer.bellforge.app";
+  // Indexer base URL. Resilience-first: kept as a fallback list + override
+  // chain so the game keeps working if the primary host goes down. Priority:
+  //   1. URL param `?indexer=<url>` (highest — lets the shell pass a preferred
+  //      indexer through to the companion when it opens for mint handoff).
+  //   2. localStorage `pokebells.indexer_base` (user or dev override).
+  //   3. First reachable entry in INDEXER_BASE_FALLBACKS.
+  // Anyone self-hosting (see docs) can add their worker to the list in their
+  // fork or override at runtime via either mechanism.
+  const INDEXER_BASE_STORAGE_KEY = "pokebells.indexer_base";
+  const INDEXER_BASE_FALLBACKS = [
+    "https://indexer.bellforge.app",
+  ];
   const INDEXER_BASE = (() => {
-    const override = (() => { try { return localStorage.getItem("pokebells.indexer_base"); } catch { return null; } })();
-    return (override && override.trim()) || INDEXER_BASE_DEFAULT;
+    const fromParam = new URLSearchParams(window.location.search).get("indexer");
+    if (fromParam && fromParam.trim()) return fromParam.trim();
+    try {
+      const fromStorage = localStorage.getItem(INDEXER_BASE_STORAGE_KEY);
+      if (fromStorage && fromStorage.trim()) return fromStorage.trim();
+    } catch {
+      // localStorage blocked — fall through to fallback list.
+    }
+    return INDEXER_BASE_FALLBACKS[0];
   })();
   const SIGNATURE_TTL_HOURS = 24;
   const BLOCK_HASH_RE = /^[0-9a-f]{64}$/i;

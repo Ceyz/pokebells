@@ -81,6 +81,42 @@ localStorage.setItem("pokebells.indexer_base", "https://pokebells-indexer.<accou
 
 Reload `bellforge.app/pokebells`. Clear the key to revert to the default.
 
+## Resilience — replacing bellforge.app
+
+The game must keep running if the primary companion + indexer hosts ever go
+down (domain expiry, operator incapacitated, etc.). Three escape hatches,
+in priority order, are baked into both `game/shell.js` (companion URL) and
+`companion/pokebells/index.html` (indexer URL):
+
+1. **URL param** — `?companion=https://alt.example.org/pokebells/` or
+   `?indexer=https://alt.example.org` overrides for the current load. Shell
+   also propagates `?companion=` through to the companion when it opens for
+   sign-in / mint handoff.
+2. **localStorage** — `pokebells:companion_url` (shell) or
+   `pokebells.indexer_base` (companion). Sticky per-browser user override.
+3. **Fallback list** — hardcoded array at the top of each file
+   (`COMPANION_URL_FALLBACKS`, `INDEXER_BASE_FALLBACKS`). Adding a mirror
+   only needs a patch push + new shell inscription (patchable via a new
+   `p:pokebells-manifest`, no root re-mint).
+
+The indexer itself is stateless validation — anyone can stand up a clone:
+
+1. Fork the repo, keep `game/indexer/` intact (code is not branded).
+2. Set their own `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` secrets.
+3. Create a D1 named `pokebells-indexer`, paste the id into `wrangler.toml`.
+4. Push — the CI runs migrate + deploy on their account.
+5. Their users set `localStorage.pokebells.indexer_base` or append
+   `?indexer=<their-worker-url>` to load.
+
+Community indexers can diverge in policy (stricter / looser validation,
+different sprite-pack acceptance, etc.); the on-chain capture JSON stays
+canonical, any indexer re-validates from the same source of truth.
+
+Future: the `p:pokebells-collection` inscription can declare a canonical
+`companion_urls[]` + `indexer_urls[]` list that shell.js fetches and caches
+on boot. That moves the fallback list on-chain and removes the need for a
+new shell inscription when adding mirrors. Not blocking v1 launch.
+
 ## Endpoints
 
 All JSON, all CORS `*`, all read-only except `POST /api/captures`.
