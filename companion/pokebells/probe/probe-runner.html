@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PokeBells bootloader probe (testnet)</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; padding: 24px; max-width: 820px; margin: 0 auto; background:#111;color:#eee;}
+  h1 { margin: 0 0 6px; font-size: 20px; }
+  .muted { color: #999; font-size: 12px; }
+  section { border:1px solid #333; border-radius:8px; padding:14px 18px; margin:14px 0; background:#181818; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+  .pill.ok { background:#0a7a25; color:#fff; }
+  .pill.err { background:#a71d1d; color:#fff; }
+  .pill.warn { background:#b86b00; color:#fff; }
+  pre { background:#0a0a0a; border:1px solid #222; padding:10px; border-radius:6px; overflow:auto; font-size:12px; color:#ccc; }
+  label { display:block; font-weight:600; margin:10px 0 4px; }
+  input { width:100%; padding:8px; border-radius:6px; border:1px solid #333; background:#0a0a0a; color:#eee; font:13px/1.4 ui-monospace, monospace;}
+  button { font:inherit; padding:8px 14px; border-radius:6px; border:1px solid #378add; background:#378add; color:#fff; cursor:pointer; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+
+<h1>Bootloader probe (testnet)</h1>
+<p class="muted">
+  Verifies that dynamic <code>import()</code> succeeds against Nintondo's Bells
+  testnet content host with the correct MIME + CORS, when this HTML runs as
+  an inscription inside the Nintondo viewer iframe. If this probe passes,
+  the full 17-inscription dry run is safe. If it fails, the problem is at
+  the Nintondo delivery layer, not our code.
+</p>
+
+<section>
+  <strong>1 · Probe module inscription id</strong>
+  <p class="muted">Inscribe <code>probe-module.mjs</code> on Bells testnet as
+  <code>application/javascript</code> first. Paste the returned id here, then
+  save + re-inscribe this runner HTML so the id is baked in. Running this
+  locally also works — it will hit the testnet content host directly.</p>
+  <label for="probe-id">Inscription id of probe-module.mjs</label>
+  <input id="probe-id" type="text"
+         placeholder="e.g. eef1cf1566...a71i0"
+         value="REPLACE_WITH_PROBE_MODULE_INSCRIPTION_ID">
+  <div class="row" style="margin-top:10px;">
+    <button id="run-btn" type="button">Run probe</button>
+    <span id="run-status" class="pill warn">idle</span>
+  </div>
+</section>
+
+<section>
+  <strong>2 · Results</strong>
+  <pre id="results">no results yet</pre>
+</section>
+
+<section>
+  <strong>What this checks</strong>
+  <ul>
+    <li><strong>fetch()</strong> to <code>bells-testnet-content.nintondo.io/content/&lt;id&gt;</code> with status 200.</li>
+    <li><strong>Content-Type</strong> is <code>application/javascript</code> or <code>text/javascript</code> (required for import()).</li>
+    <li><strong>CORS</strong> allows the current origin (inscription iframe origin is opaque; allow-origin must be * or present).</li>
+    <li><strong>import()</strong> evaluates the module and the <code>window.PokeBellsTestnetProbe</code> global is populated.</li>
+  </ul>
+</section>
+
+<script>
+(() => {
+  const CONTENT_BASE = 'https://bells-testnet-content.nintondo.io/content/';
+  const INSCRIPTION_ID_RE = /^[0-9a-f]{64}i\d+$/i;
+
+  const $ = (id) => document.getElementById(id);
+  const write = (lines) => { $('results').textContent = lines.join('\n'); };
+  const setStatus = (text, tone) => {
+    const el = $('run-status');
+    el.textContent = text;
+    el.className = `pill ${tone === 'err' ? 'err' : tone === 'ok' ? 'ok' : 'warn'}`;
+  };
+
+  async function runProbe() {
+    const id = $('probe-id').value.trim();
+    const lines = [];
+    const log = (msg) => { lines.push(msg); write(lines); };
+    log(`[probe] started at ${new Date().toISOString()}`);
+    log(`[probe] inscription id: ${id}`);
+    log(`[probe] origin: ${window.location.origin}`);
+    log(`[probe] in iframe: ${window.self !== window.top}`);
+
+    if (!INSCRIPTION_ID_RE.test(id)) {
+      setStatus('invalid id', 'err');
+      log('[probe] FAIL — id does not match /^[0-9a-f]{64}i\\d+$/');
+      return;
+    }
+
+    const url = CONTENT_BASE + id;
+    log(`[probe] GET ${url}`);
+
+    // Stage A: fetch + inspect headers
+    let response;
+    try {
+      response = await fetch(url, { cache: 'no-cache' });
+    } catch (e) {
+      setStatus('fetch failed', 'err');
+      log(`[probe] FAIL — fetch threw: ${e.name}: ${e.message}`);
+      return;
+    }
+    log(`[probe] response status: ${response.status}`);
+    const ct = response.headers.get('content-type') || '(none)';
+    const acao = response.headers.get('access-control-allow-origin') || '(none)';
+    log(`[probe] content-type: ${ct}`);
+    log(`[probe] access-control-allow-origin: ${acao}`);
+    if (!response.ok) {
+      setStatus(`HTTP ${response.status}`, 'err');
+      log('[probe] FAIL — non-200 response');
+      return;
+    }
+    const preview = (await response.clone().text()).slice(0, 160).replace(/\s+/g, ' ');
+    log(`[probe] body preview: ${preview}…`);
+
+    // Stage B: dynamic import
+    log('[probe] import()…');
+    try {
+      await import(url);
+    } catch (e) {
+      setStatus('import() failed', 'err');
+      log(`[probe] FAIL — import threw: ${e.name}: ${e.message}`);
+      log('[probe] Hint: content-type must be "application/javascript" or "text/javascript", not "application/octet-stream" or "text/plain".');
+      return;
+    }
+
+    // Stage C: verify module side-effect
+    const marker = window.PokeBellsTestnetProbe;
+    if (!marker || marker.marker !== 'module-loaded-ok') {
+      setStatus('marker missing', 'err');
+      log('[probe] FAIL — imported module did not populate window.PokeBellsTestnetProbe.marker');
+      return;
+    }
+    const addResult = typeof marker.addOne === 'function' ? marker.addOne(41) : null;
+    log(`[probe] marker.loadedAt: ${marker.loadedAt}`);
+    log(`[probe] marker.addOne(41): ${addResult}`);
+
+    setStatus('PASS', 'ok');
+    log('[probe] PASS — dynamic import() works from Nintondo content host.');
+    log('[probe] The 17-inscription full dry run is unblocked.');
+  }
+
+  $('run-btn').addEventListener('click', runProbe);
+})();
+</script>
+
+</body>
+</html>
