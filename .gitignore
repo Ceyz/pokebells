@@ -35,8 +35,11 @@ test-nintondo.html
 
 # One-shot dev tools (sprite pack generator, future extraction scripts).
 # Private by default; allowlist specific files here if/when ready to publish.
-tools/
+# NOTE: `tools/*` (not `tools/`) so the `!tools/foo` whitelists below work —
+# Git refuses to re-include a file whose parent directory is excluded.
+tools/*
 !tools/package-indexer-for-inscription.mjs
+!tools/apply-d1-schema.mjs
 
 # Phase 4.5 relay — transparent transport layer, safe to publish
 # (no ROM, no IP, pure WebSocket relay + signature verification)
@@ -85,6 +88,7 @@ companion/pokebells/signin-verify.mjs
 # Dev/build artifacts
 node_modules/
 .partykit/
+.wrangler/
 dist/
 build/
 *.log
