@@ -563,7 +563,11 @@
   // Anyone self-hosting (see docs) can add their worker to the list in their
   // fork or override at runtime via either mechanism.
   const INDEXER_BASE_STORAGE_KEY = "pokebells.indexer_base";
+  // Order = priority. Keep the workers.dev URL first because the
+  // indexer.bellforge.app CNAME is not yet provisioned; once DNS is
+  // live we can flip the order without breaking older clients.
   const INDEXER_BASE_FALLBACKS = [
+    "https://pokebells-indexer.ceyzcrypto.workers.dev",
     "https://indexer.bellforge.app",
   ];
   const INDEXER_BASE = (() => {
@@ -579,8 +583,15 @@
   })();
   const SIGNATURE_TTL_HOURS = 24;
   const BLOCK_HASH_RE = /^[0-9a-f]{64}$/i;
+  const HEX64_RE = /^[0-9a-f]{64}$/i;
   const WRAM_BYTE_LENGTH = 0x2000;
-  const ATTESTATION_SCHEME = "sha256:block_hash+wram+signed_wallet+session_sequence:v1";
+  const ATTESTATION_SCHEME_V1_1 = "sha256:block_hash+wram8k_bank0_bank1+svbk+signed_wallet+session_sequence:v1.1";
+  const ATTESTATION_SCHEME_V2 = "sha256:block_hash+ram_snapshot_hash+svbk+signed_wallet+session_sequence+ivs_commitment:v2";
+  const ATTESTATION_SCHEME = ATTESTATION_SCHEME_V2;
+  const IVS_COMMITMENT_SCHEME = "sha256:canonical(ivs)+salt_32b:v1";
+  const GEN2_SPECIES_MIN = 1;
+  const GEN2_SPECIES_MAX = 251;
+  const CAPTURE_SCHEMA_VERSION = "1.4";
   const ELECTRS_BASE_URLS = {
     "bells-mainnet": "https://api.nintondo.io",
     "bells-testnet": "https://bells-testnet-api.nintondo.io",
@@ -676,12 +687,18 @@
     return bytesToHex(new Uint8Array(digest));
   };
 
-  const computeAttestation = async (parsed, ramSnapshotBytes) => {
+  // v2 attestation (schema 1.4): hash of block_hash + ram_snapshot_hash +
+  // svbk byte + wallet + sequence + ivs_commitment. Matches
+  // computeCaptureAttestationV2 in game/capture-core.mjs.
+  const computeAttestationV2 = async (parsed) => {
+    const svbkByte = new Uint8Array([Number(parsed.svbk_at_capture ?? 0) & 0xff]);
     return sha256Hex([
       String(parsed.block_hash_at_capture ?? "").trim().toLowerCase(),
-      ramSnapshotBytes,
+      String(parsed.ram_snapshot_hash ?? "").trim().toLowerCase(),
+      svbkByte,
       String(parsed.signed_in_wallet ?? ""),
       String(parsed.session_sequence_number ?? ""),
+      String(parsed.ivs_commitment ?? "").trim().toLowerCase(),
     ]);
   };
 
@@ -847,10 +864,13 @@
 
     if (parsed.p !== "pokebells") return { ok: false, error: 'field "p" must equal "pokebells"' };
     if (parsed.op !== "capture") return { ok: false, error: 'field "op" must equal "capture"' };
+    if (parsed.schema_version !== CAPTURE_SCHEMA_VERSION) {
+      return { ok: false, error: `schema_version must equal "${CAPTURE_SCHEMA_VERSION}" (got ${parsed.schema_version ?? "missing"})` };
+    }
 
     const speciesId = Number.isInteger(parsed.species_id) ? parsed.species_id : parsed.species;
-    if (!Number.isInteger(speciesId) || speciesId < 1 || speciesId > 151) {
-      return { ok: false, error: "species_id must be integer in [1..151]" };
+    if (!Number.isInteger(speciesId) || speciesId < GEN2_SPECIES_MIN || speciesId > GEN2_SPECIES_MAX) {
+      return { ok: false, error: `species_id must be integer in [${GEN2_SPECIES_MIN}..${GEN2_SPECIES_MAX}]` };
     }
     if (parsed.species !== undefined && parsed.species_id !== undefined && parsed.species !== parsed.species_id) {
       return { ok: false, error: "species and species_id must match when both are present" };
@@ -859,15 +879,41 @@
       return { ok: false, error: "level must be integer in [1..100]" };
     }
 
-    const ivs = parsed.ivs ?? {};
-    for (const key of ["atk", "def", "spe"]) {
-      if (!Number.isInteger(ivs[key]) || ivs[key] < 0 || ivs[key] > 15) {
-        return { ok: false, error: `IV ${key} must be integer in [0..15]` };
-      }
+    // Schema 1.4 hides IVs / EVs / shiny / ram_snapshot until the reveal
+    // inscription. The public capture body must NOT carry plaintext values.
+    if (parsed.ivs != null) {
+      return { ok: false, error: 'schema 1.4 captures must not carry plaintext ivs (publish via op:"reveal")' };
     }
-    const specialIv = Number.isInteger(ivs.spc) ? ivs.spc : ivs.spd;
-    if (!Number.isInteger(specialIv) || specialIv < 0 || specialIv > 15) {
-      return { ok: false, error: "IV spc/spd must be integer in [0..15]" };
+    if (parsed.derived_ivs != null) {
+      return { ok: false, error: "schema 1.4 captures must not carry plaintext derived_ivs" };
+    }
+    if (parsed.evs != null) {
+      return { ok: false, error: "schema 1.4 captures must not carry plaintext evs" };
+    }
+    if (parsed.shiny != null) {
+      return { ok: false, error: "schema 1.4 captures must not carry plaintext shiny" };
+    }
+    if (parsed.ram_snapshot != null) {
+      return { ok: false, error: 'schema 1.4 captures must not carry raw ram_snapshot (hashed only)' };
+    }
+
+    const commitment = String(parsed.ivs_commitment ?? "").trim().toLowerCase();
+    if (!HEX64_RE.test(commitment)) {
+      return { ok: false, error: "ivs_commitment must be a 64-char sha256 hex" };
+    }
+    if (parsed.ivs_commitment_scheme && parsed.ivs_commitment_scheme !== IVS_COMMITMENT_SCHEME) {
+      return { ok: false, error: `ivs_commitment_scheme must equal "${IVS_COMMITMENT_SCHEME}"` };
+    }
+    const snapshotHash = String(parsed.ram_snapshot_hash ?? "").trim().toLowerCase();
+    if (!HEX64_RE.test(snapshotHash)) {
+      return { ok: false, error: "ram_snapshot_hash must be a 64-char sha256 hex" };
+    }
+    const svbk = Number(parsed.svbk_at_capture);
+    if (!Number.isInteger(svbk) || svbk < 0 || svbk > 255) {
+      return { ok: false, error: "svbk_at_capture must be a byte in [0..255]" };
+    }
+    if (svbk !== 1) {
+      return { ok: false, error: "svbk_at_capture must equal 1 under attestation v1.1+/v2" };
     }
 
     if (!BLOCK_HASH_RE.test(String(parsed.block_hash_at_capture ?? "").trim())) {
@@ -879,27 +925,14 @@
     if (typeof parsed.signed_in_wallet !== "string" || !parsed.signed_in_wallet.trim()) {
       return { ok: false, error: "signed_in_wallet must be present" };
     }
-    if ((parsed.ram_snapshot_encoding ?? "base64") !== "base64") {
-      return { ok: false, error: 'ram_snapshot_encoding must equal "base64"' };
-    }
-    if (parsed.attestation_scheme && parsed.attestation_scheme !== ATTESTATION_SCHEME) {
-      return { ok: false, error: "attestation_scheme is not recognized" };
+    if (parsed.attestation_scheme !== ATTESTATION_SCHEME_V2) {
+      return { ok: false, error: `attestation_scheme must equal "${ATTESTATION_SCHEME_V2}"` };
     }
     if (!BLOCK_HASH_RE.test(String(parsed.attestation ?? "").trim())) {
       return { ok: false, error: "attestation must be a 64-char hex hash" };
     }
 
-    let ramSnapshotBytes;
-    try {
-      ramSnapshotBytes = decodeBase64(parsed.ram_snapshot ?? "");
-    } catch (e) {
-      return { ok: false, error: `ram_snapshot is not valid base64: ${e.message}` };
-    }
-    if (ramSnapshotBytes.byteLength !== WRAM_BYTE_LENGTH) {
-      return { ok: false, error: `ram_snapshot must decode to ${WRAM_BYTE_LENGTH} bytes` };
-    }
-
-    const expectedAttestation = await computeAttestation(parsed, ramSnapshotBytes);
+    const expectedAttestation = await computeAttestationV2(parsed);
     if (String(parsed.attestation).trim().toLowerCase() !== expectedAttestation) {
       return { ok: false, error: "attestation does not match the provenance fields" };
     }
@@ -925,7 +958,8 @@
       parsed: {
         ...parsed,
         species_id: speciesId,
-        iv_special: specialIv,
+        ivs_commitment: commitment,
+        ram_snapshot_hash: snapshotHash,
       },
     };
   };
@@ -945,11 +979,12 @@
     }
 
     const parsed = result.parsed;
+    const commitShort = parsed.ivs_commitment.slice(0, 12);
     out.innerHTML =
       `<p><span class="pill ok">VALID</span> ${parsed.species_name ?? "Pokemon"} ` +
       `(species ${parsed.species_id}, level ${parsed.level}, ` +
-      `IVs ${parsed.ivs.atk}/${parsed.ivs.def}/${parsed.ivs.spe}/${parsed.iv_special}` +
-      `${parsed.shiny ? ", SHINY" : ""}, attested)</p>`;
+      `commitment ${commitShort}…, attested v2). ` +
+      `<span class="muted">IVs / EVs / shiny revealed by op:"reveal" after mint.</span></p>`;
     $("mint-btn").disabled = false;
     $("mint-cost").classList.remove("hidden");
     validatedJson = raw;
@@ -1642,17 +1677,28 @@
     level.textContent = `Lv. ${parsed.level}`;
     card.appendChild(level);
 
-    const ivSpecial = Number.isInteger(parsed.ivs?.spc) ? parsed.ivs.spc : parsed.ivs?.spd;
     const ivs = document.createElement("div");
     ivs.className = "ivs";
-    ivs.textContent = `${parsed.ivs?.atk}/${parsed.ivs?.def}/${parsed.ivs?.spe}/${ivSpecial ?? "?"}`;
+    const hasPlainIvs = parsed.ivs && Number.isInteger(parsed.ivs.atk);
+    if (hasPlainIvs) {
+      const ivSpecial = Number.isInteger(parsed.ivs.spc) ? parsed.ivs.spc : parsed.ivs.spd;
+      ivs.textContent = `${parsed.ivs.atk}/${parsed.ivs.def}/${parsed.ivs.spe}/${ivSpecial ?? "?"}`;
+    } else {
+      ivs.textContent = "IVs hidden — reveal pending";
+      ivs.classList.add("muted");
+    }
     card.appendChild(ivs);
 
-    if (parsed.shiny) {
+    if (parsed.shiny === true) {
       const shiny = document.createElement("span");
       shiny.className = "shiny-badge";
       shiny.textContent = "✨ SHINY";
       card.appendChild(shiny);
+    } else if (parsed.shiny == null && !hasPlainIvs) {
+      const shinyPending = document.createElement("span");
+      shinyPending.className = "shiny-badge muted";
+      shinyPending.textContent = "Shiny?";
+      card.appendChild(shinyPending);
     }
 
     return card;
