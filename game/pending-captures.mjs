@@ -56,18 +56,44 @@ export function isAllowedPendingTransition(from, to) {
   return Boolean(PENDING_CAPTURE_TRANSITIONS[from]?.has(to));
 }
 
-// Throws on illegal transitions or invariant 3 / broadcast-partial
-// violations. Returns the `next` row shape ready to persist (caller
-// writes to IDB).
+// Refuses two classes of bug:
 //
-// Invariant 3 is strengthened from "no re-inscribe if inscription_id
-// set" to "no rewind if ANY commit/mint txid OR inscription_id is set".
-// This closes the broadcast-partial gap: if the fund tx broadcast
-// succeeded but the reveal failed, commit_fund_txid IS set. The state
-// machine refuses to rewind to pending_commit (which would imply "start
-// fresh" + lose track of the in-flight fund tx). Caller must instead
-// resume from commit_broadcast with the existing fund_txid in mind
-// (manual re-broadcast of just the reveal).
+//  (a) Rewind: re-entering pending_commit / pending_mint while any
+//      commit/mint artifact exists. That would lose track of an
+//      in-flight broadcast (would let the caller "start fresh" +
+//      double-spend the existing fund tx). Refused regardless of
+//      partial.
+//
+//  (b) Conflict: the caller's `partial` tries to overwrite an existing
+//      *_txid / *_inscription_id with a different non-null value.
+//      That signals a logic bug — typically two parallel sign+broadcast
+//      sessions racing to write conflicting artifacts. Refused.
+//
+// What's allowed (and was previously rejected by the old over-broad
+// rule): the natural progressive flow `pending_commit (with fund_txid
+// + reveal_txid) → commit_broadcast (adding inscription_id)`. The
+// existing artifacts are preserved (partial doesn't overwrite them);
+// no new conflicting value is provided. The transition is just the
+// "promote the row to broadcast status" step. Same for mint side.
+//
+// The recovery semantic in shell.js (detectCommitRecoveryState) ensures
+// callers never hit the inscriber lib twice — that's enforced at the
+// flow level, NOT here. This module only catches state-machine
+// violations.
+function checkArtifactConflict(existing, partial, side) {
+  const fields = side === 'commit'
+    ? ['commit_fund_txid', 'commit_reveal_txid', 'commit_inscription_id']
+    : ['mint_fund_txid', 'mint_reveal_txid', 'mint_inscription_id'];
+  for (const f of fields) {
+    const existingVal = existing[f];
+    const partialVal = partial?.[f];
+    if (existingVal && partialVal != null && partialVal !== existingVal) {
+      return `${f} conflict: existing=${existingVal}, partial=${partialVal}`;
+    }
+  }
+  return null;
+}
+
 export function assertPendingTransition(existing, nextStatus, partial = null) {
   if (!existing) {
     throw new Error('assertPendingTransition: existing row required');
@@ -80,22 +106,15 @@ export function assertPendingTransition(existing, nextStatus, partial = null) {
       `illegal pendingCaptures transition ${existing.status} → ${nextStatus}`,
     );
   }
-  // ---- Commit side: refuse rewind / re-broadcast if any commit
-  // artifact exists on chain (or in mempool).
+
+  // ---- Rewind guards (a): refuse re-entering pending_* while
+  // artifacts are in flight. A fresh broadcast attempt MUST come from
+  // a clean row.
   const commitInFlight = Boolean(
     existing.commit_inscription_id
     || existing.commit_fund_txid
     || existing.commit_reveal_txid,
   );
-  if (nextStatus === 'commit_broadcast' && commitInFlight) {
-    throw new Error(
-      `refusing to re-broadcast commit: existing artifact `
-      + `(inscription_id=${existing.commit_inscription_id ?? '∅'}, `
-      + `fund_txid=${existing.commit_fund_txid ?? '∅'}, `
-      + `reveal_txid=${existing.commit_reveal_txid ?? '∅'}). `
-      + `Resume from current state — never rebuild from scratch.`,
-    );
-  }
   if (nextStatus === 'pending_commit' && commitInFlight) {
     throw new Error(
       `refusing rewind commit_broadcast → pending_commit: a commit tx `
@@ -103,26 +122,33 @@ export function assertPendingTransition(existing, nextStatus, partial = null) {
       + `the in-flight broadcast (broadcast-partial guard).`,
     );
   }
-  // ---- Mint side: same rule.
   const mintInFlight = Boolean(
     existing.mint_inscription_id
     || existing.mint_fund_txid
     || existing.mint_reveal_txid,
   );
-  if (nextStatus === 'mint_broadcast' && mintInFlight) {
-    throw new Error(
-      `refusing to re-broadcast mint: existing artifact `
-      + `(inscription_id=${existing.mint_inscription_id ?? '∅'}, `
-      + `fund_txid=${existing.mint_fund_txid ?? '∅'}, `
-      + `reveal_txid=${existing.mint_reveal_txid ?? '∅'}).`,
-    );
-  }
   if (nextStatus === 'pending_mint' && mintInFlight) {
     throw new Error(
       `refusing rewind mint_broadcast → pending_mint: a mint tx or `
       + `inscription_id already exists.`,
     );
   }
+
+  // ---- Conflict guards (b): refuse partial values that overwrite
+  // existing artifacts with different non-null values.
+  if (nextStatus === 'commit_broadcast') {
+    const conflict = checkArtifactConflict(existing, partial, 'commit');
+    if (conflict) {
+      throw new Error(`refusing transition to commit_broadcast: ${conflict}`);
+    }
+  }
+  if (nextStatus === 'mint_broadcast') {
+    const conflict = checkArtifactConflict(existing, partial, 'mint');
+    if (conflict) {
+      throw new Error(`refusing transition to mint_broadcast: ${conflict}`);
+    }
+  }
+
   return {
     ...existing,
     ...(partial ?? {}),

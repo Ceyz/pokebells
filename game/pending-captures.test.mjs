@@ -112,23 +112,38 @@ test('assertPendingTransition: rejects illegal edges', () => {
   );
 });
 
-test('assertPendingTransition: invariant 3 — refuses re-inscribe commit', () => {
+test('assertPendingTransition: refuses commit_broadcast if partial overwrites existing inscription_id with a different value', () => {
   const row = makeRow({ commit_inscription_id: 'd'.repeat(64) + 'i0', status: 'pending_commit' });
   assert.throws(
-    () => assertPendingTransition(row, 'commit_broadcast'),
-    /refusing to re-broadcast commit/,
+    () => assertPendingTransition(row, 'commit_broadcast', {
+      commit_inscription_id: 'e'.repeat(64) + 'i0',
+    }),
+    /commit_inscription_id conflict/,
   );
 });
 
-test('assertPendingTransition: invariant 3 — refuses re-inscribe mint', () => {
+test('assertPendingTransition: refuses mint_broadcast if partial overwrites existing inscription_id with a different value', () => {
   const row = makeRow({
     status: 'pending_mint',
     commit_inscription_id: 'd'.repeat(64) + 'i0',
     mint_inscription_id: 'e'.repeat(64) + 'i0',
   });
   assert.throws(
-    () => assertPendingTransition(row, 'mint_broadcast'),
-    /refusing to re-broadcast mint/,
+    () => assertPendingTransition(row, 'mint_broadcast', {
+      mint_inscription_id: 'f'.repeat(64) + 'i0',
+    }),
+    /mint_inscription_id conflict/,
+  );
+});
+
+test('assertPendingTransition: refuses commit_broadcast if partial overwrites existing fund_txid', () => {
+  const row = makeRow({ status: 'pending_commit', commit_fund_txid: 'a'.repeat(64) });
+  assert.throws(
+    () => assertPendingTransition(row, 'commit_broadcast', {
+      commit_fund_txid: 'b'.repeat(64),
+      commit_inscription_id: 'c'.repeat(64) + 'i0',
+    }),
+    /commit_fund_txid conflict/,
   );
 });
 
@@ -175,29 +190,7 @@ test('assertPendingTransition: rewind commit_broadcast → pending_commit ONLY w
   );
 });
 
-test('assertPendingTransition: refuse re-broadcast if ANY commit/mint artifact exists', () => {
-  // Fund-only (reveal failed before tx broadcast) — re-broadcast forbidden.
-  const fundOnly = makeRow({
-    status: 'pending_commit',
-    commit_fund_txid: 'a'.repeat(64),
-  });
-  assert.throws(
-    () => assertPendingTransition(fundOnly, 'commit_broadcast'),
-    /refusing to re-broadcast commit/,
-  );
-
-  // Mint side: fund-only.
-  const mintFundOnly = makeRow({
-    status: 'pending_mint',
-    commit_inscription_id: 'd'.repeat(64) + 'i0',
-    mint_fund_txid: 'c'.repeat(64),
-  });
-  assert.throws(
-    () => assertPendingTransition(mintFundOnly, 'mint_broadcast'),
-    /refusing to re-broadcast mint/,
-  );
-
-  // Mint side: rewind mint_broadcast → pending_mint with txid set.
+test('assertPendingTransition: rewind to pending_mint with mint artifacts → refused', () => {
   const mintWithFund = makeRow({
     status: 'mint_broadcast',
     commit_inscription_id: 'd'.repeat(64) + 'i0',
@@ -207,6 +200,57 @@ test('assertPendingTransition: refuse re-broadcast if ANY commit/mint artifact e
     () => assertPendingTransition(mintWithFund, 'pending_mint'),
     /refusing rewind mint_broadcast → pending_mint/,
   );
+});
+
+test('integration: progressive commit happy path — fresh → cache → fund_txid → reveal_txid → commit_broadcast (no throws)', () => {
+  // Mirrors what runDirectMintFlow does in shell.js. The state machine
+  // must allow the full sequence without throwing — GPT round 6 caught
+  // that the over-broad invariant blocked the final transition.
+  let row = makeRow();
+  assert.equal(row.status, 'pending_commit');
+
+  // Step 1: cache signed hexes (status unchanged).
+  row = { ...row, commit_fund_tx_hex: 'aabb', commit_reveal_tx_hex: 'ccdd' };
+
+  // Step 2: persist commit_fund_txid after fund broadcast (status unchanged).
+  row = { ...row, commit_fund_txid: 'a'.repeat(64) };
+
+  // Step 3: persist commit_reveal_txid after reveal broadcast (status unchanged).
+  row = { ...row, commit_reveal_txid: 'b'.repeat(64) };
+
+  // Step 4: transition to commit_broadcast with the inscription_id.
+  // Existing fund/reveal txids must be preserved; partial only adds
+  // inscription_id. MUST NOT throw.
+  const next = assertPendingTransition(row, 'commit_broadcast', {
+    commit_inscription_id: 'b'.repeat(64) + 'i0',
+  });
+  assert.equal(next.status, 'commit_broadcast');
+  assert.equal(next.commit_inscription_id, 'b'.repeat(64) + 'i0');
+  assert.equal(next.commit_fund_txid, 'a'.repeat(64));   // preserved
+  assert.equal(next.commit_reveal_txid, 'b'.repeat(64)); // preserved
+});
+
+test('integration: progressive mint happy path passes the same way', () => {
+  let row = makeRow({
+    status: 'pending_mint',
+    commit_inscription_id: 'a'.repeat(64) + 'i0',
+    commit_fund_txid: 'a'.repeat(64),
+    commit_reveal_txid: 'a'.repeat(64),
+    commit_fund_tx_hex: 'aa',
+    commit_reveal_tx_hex: 'bb',
+  });
+
+  row = { ...row, mint_fund_tx_hex: 'cc', mint_reveal_tx_hex: 'dd' };
+  row = { ...row, mint_fund_txid: 'c'.repeat(64) };
+  row = { ...row, mint_reveal_txid: 'd'.repeat(64) };
+
+  const next = assertPendingTransition(row, 'mint_broadcast', {
+    mint_inscription_id: 'd'.repeat(64) + 'i0',
+  });
+  assert.equal(next.status, 'mint_broadcast');
+  assert.equal(next.mint_inscription_id, 'd'.repeat(64) + 'i0');
+  assert.equal(next.mint_fund_txid, 'c'.repeat(64));
+  assert.equal(next.mint_reveal_txid, 'd'.repeat(64));
 });
 
 test('cancelAllowed: returns false for mint-locked + terminal states', () => {
