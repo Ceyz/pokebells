@@ -2,7 +2,7 @@
   "p": "pokebells-manifest",
   "v": 1,
   "created_ms": 0,
-  "note": "Replace every *_inscription_id value with the real id after minting each child module. The bootloader refuses to load a manifest whose ids don't match /^[0-9a-f]{64}i\\d+$/. Keys are locked (bootloader reads these exact names); values can change across manifest versions as long as the referenced modules honor the contract each key represents.",
+  "note": "Replace every *_inscription_id value with the real id after minting each child module. Chunked modules (pokebells_inscriber) use a *_chunks array instead of *_inscription_id — bootloader fetches each chunk, concatenates bytes in order, and blob-imports. The bootloader refuses to load a manifest whose ids don't match /^[0-9a-f]{64}i\\d+$/. Keys are locked (bootloader reads these exact names); values can change across manifest versions as long as the referenced modules honor the contract each key represents.",
   "capture_core_inscription_id": "REPLACE_ME_capture_core_es_module_i0",
   "gen2_species_inscription_id": "REPLACE_ME_gen2_species_es_module_i0",
   "gen2_pc_storage_inscription_id": "REPLACE_ME_gen2_pc_storage_es_module_i0",
@@ -10,7 +10,11 @@
   "wallet_adapter_inscription_id": "REPLACE_ME_wallet_adapter_es_module_i0",
   "signin_verify_inscription_id": "REPLACE_ME_signin_verify_es_module_i0",
   "pbrp_session_key_inscription_id": "REPLACE_ME_pbrp_session_key_es_module_i0",
-  "pokebells_inscriber_inscription_id": "REPLACE_ME_pokebells_inscriber_browser_bundle_i0",
+  "pokebells_inscriber_chunks": [
+    "REPLACE_ME_pokebells_inscriber_chunk_0_i0",
+    "REPLACE_ME_pokebells_inscriber_chunk_1_i0",
+    "REPLACE_ME_pokebells_inscriber_chunk_2_i0"
+  ],
   "shell_inscription_id": "REPLACE_ME_shell_es_module_i0",
   "rom_manifest_inscription_id": "REPLACE_ME_rom_chunks_manifest_i0",
   "collection_inscription_id": "REPLACE_ME_pokebells_collection_i0"

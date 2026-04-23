@@ -164,11 +164,40 @@ async function fetchManifest(manifestId, contentBase) {
 }
 
 function resolveModuleUrl(mode, contentBase, manifest, key) {
-  if (mode === 'local') return LOCAL_MODULE_PATHS[key];
-  const field = `${key}_inscription_id`;
-  const id = manifest?.[field];
-  assertValidInscriptionId(id, `manifest.${field}`);
-  return `${contentBase}${id}`;
+  const urls = resolveModuleUrlList(mode, contentBase, manifest, key);
+  if (urls.length !== 1) {
+    throw new Error(
+      `Module "${key}" is chunked (${urls.length} pieces). `
+      + 'Use window.PokeBellsBoot.loadModule() instead of resolveModuleUrl().',
+    );
+  }
+  return urls[0];
+}
+
+// Returns an ordered list of URLs that together form the module body:
+//  - local mode: 1 URL, pointing to the on-disk .mjs/.js
+//  - inscription mode single: 1 URL, pointing to /content/<id>
+//  - inscription mode chunked: N URLs, bytes concatenated in array order
+// Chunked modules are inscribed one piece per inscription because a
+// single-inscription reveal containing the full bundle would exceed the
+// Bells standard-tx 400K WU weight limit. The manifest advertises them
+// as `<key>_chunks: ["<id1>i0", "<id2>i0", ...]`.
+function resolveModuleUrlList(mode, contentBase, manifest, key) {
+  if (mode === 'local') {
+    const p = LOCAL_MODULE_PATHS[key];
+    if (!p) throw new Error(`Unknown local module key: ${key}`);
+    return [p];
+  }
+  const chunksField = `${key}_chunks`;
+  const chunks = manifest?.[chunksField];
+  if (Array.isArray(chunks) && chunks.length > 0) {
+    for (const id of chunks) assertValidInscriptionId(id, `manifest.${chunksField}[]`);
+    return chunks.map((id) => `${contentBase}${id}`);
+  }
+  const singleField = `${key}_inscription_id`;
+  const single = manifest?.[singleField];
+  assertValidInscriptionId(single, `manifest.${singleField}`);
+  return [`${contentBase}${single}`];
 }
 
 function escapeHtml(value) {
@@ -232,35 +261,53 @@ async function fetchAsBlobUrl(url) {
 }
 
 async function importModule(key, url) {
-  const isHttp = /^https?:\/\//i.test(url);
-  // Local relative paths (./capture-core.mjs etc.) import directly — the dev
-  // server serves them with the correct MIME. Only HTTP(S) URLs (inscription
-  // mode) go through the blob trampoline.
-  if (!isHttp) {
+  return loadAndImport(key, [url]);
+}
+
+// Load a module from 1+ URLs. For single-URL local dev, direct-imports.
+// For HTTP URLs (inscription mode), fetches each URL, concatenates the
+// bytes in order, and imports the result via a Blob URL with an
+// application/javascript MIME. Works for both monolithic and chunked
+// modules — a single-element `urls` is the trivial case.
+async function loadAndImport(key, urls) {
+  if (urls.length === 0) throw new Error(`No URLs resolved for module "${key}"`);
+  if (urls.length === 1 && !/^https?:\/\//i.test(urls[0])) {
+    // Local dev fast path — keeps stack traces clean in devtools.
     try {
-      await import(/* @vite-ignore */ url);
-      return;
+      return await import(/* @vite-ignore */ urls[0]);
     } catch (error) {
-      throw new Error(`Failed to load local module "${key}" from ${url}: ${error?.message ?? error}`);
+      throw new Error(`Failed to load local module "${key}" from ${urls[0]}: ${error?.message ?? error}`);
     }
   }
 
-  let blobUrl;
+  let parts;
   try {
-    blobUrl = await fetchAsBlobUrl(url);
+    parts = await Promise.all(urls.map(async (u, i) => {
+      const response = await fetch(u, { cache: 'no-cache' });
+      if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${i}: ${u}`);
+      const text = await response.text();
+      if (!text) throw new Error(`empty body on chunk ${i}: ${u}`);
+      return text;
+    }));
   } catch (error) {
     throw new Error(
-      `Failed to fetch module "${key}" from ${url}: ${error?.message ?? error}. `
-      + 'Verify the inscription id is correct and the content host is reachable.',
+      `Failed to fetch module "${key}" (${urls.length} chunk${urls.length > 1 ? 's' : ''}): ${error?.message ?? error}. `
+      + 'Verify the inscription id(s) are correct and the content host is reachable.',
     );
   }
+
+  const body = parts.length === 1 ? parts[0] : parts.join('');
+  const blob = new Blob([body], { type: 'application/javascript' });
+  const blobUrl = URL.createObjectURL(blob);
   try {
-    await import(/* @vite-ignore */ blobUrl);
+    return await import(/* @vite-ignore */ blobUrl);
   } catch (error) {
     throw new Error(
-      `Failed to evaluate module "${key}" loaded from ${url}: ${error?.message ?? error}. `
-      + 'The inscription bytes are not valid ES module syntax — check the source .mjs file '
-      + 'was inscribed verbatim (no truncation or encoding mangle).',
+      `Failed to evaluate module "${key}" loaded from ${urls.length} chunk(s): ${error?.message ?? error}. `
+      + (urls.length > 1
+        ? 'Chunks may have been concatenated in wrong order or one is truncated — '
+        : 'The inscription bytes are not valid ES module syntax — ')
+      + 'check the source .mjs file was inscribed verbatim (no truncation or encoding mangle).',
     );
   } finally {
     URL.revokeObjectURL(blobUrl);
@@ -282,14 +329,19 @@ async function boot() {
   }
 
   for (const key of MODULE_LOAD_ORDER) {
-    const url = resolveModuleUrl(mode, contentBase, manifest, key);
-    await importModule(key, url);
-    console.info('[boot] loaded', key, url);
+    const urls = resolveModuleUrlList(mode, contentBase, manifest, key);
+    await loadAndImport(key, urls);
+    console.info('[boot] loaded', key, urls.length === 1 ? urls[0] : `(${urls.length} chunks)`);
   }
 
   // Expose the resolver so shell.js can lazy-import non-critical modules
-  // (e.g. pokebells_inscriber, ~660 KB, only needed at Mint-click time)
+  // (e.g. pokebells_inscriber, 420+ KB, only needed at Mint-click time)
   // via the same network/mode resolution path used at boot.
+  //
+  // - resolveModuleUrl(key): legacy single-URL API, throws for chunked
+  //   modules. Keep as a hint to callers that need to migrate.
+  // - loadModule(key): new chunked-aware API. Fetches all pieces,
+  //   concats, blob-imports, returns the module namespace promise.
   window.PokeBellsBoot = Object.freeze({
     network,
     mode,
@@ -298,13 +350,20 @@ async function boot() {
     resolveModuleUrl(key) {
       return resolveModuleUrl(mode, contentBase, manifest, key);
     },
+    resolveModuleUrlList(key) {
+      return resolveModuleUrlList(mode, contentBase, manifest, key);
+    },
+    async loadModule(key) {
+      const urls = resolveModuleUrlList(mode, contentBase, manifest, key);
+      return loadAndImport(key, urls);
+    },
     importModule,
   });
 
   // shell.js runs immediately on evaluation — it expects window.PokeBells*
   // globals to already be populated by the earlier imports. Load it last.
-  const shellUrl = resolveModuleUrl(mode, contentBase, manifest, 'shell');
-  await importModule('shell', shellUrl);
+  const shellUrls = resolveModuleUrlList(mode, contentBase, manifest, 'shell');
+  await loadAndImport('shell', shellUrls);
   console.info('[boot] shell evaluated');
 }
 

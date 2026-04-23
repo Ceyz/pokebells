@@ -1,0 +1,30 @@
+{
+  "p": "pokebells-module-chunks",
+  "v": 1,
+  "key": "pokebells_inscriber",
+  "total_bytes": 423749,
+  "chunk_count": 3,
+  "chunks": [
+    {
+      "index": 0,
+      "inscribeAs": "pokebells-inscriber.browser.chunk0.txt",
+      "bytes": 200000,
+      "sha256": "216ab8dc4745bd659044ce9e87da7d0254c50e2a983b9fe047bc421ec5926235",
+      "inscription_id": "REPLACE_ME_CHUNK_0_i0"
+    },
+    {
+      "index": 1,
+      "inscribeAs": "pokebells-inscriber.browser.chunk1.txt",
+      "bytes": 200000,
+      "sha256": "1850eaf76093b9d4b138dae83ff9f2ff70d7f795442e9ec86e2b23af4c13978d",
+      "inscription_id": "REPLACE_ME_CHUNK_1_i0"
+    },
+    {
+      "index": 2,
+      "inscribeAs": "pokebells-inscriber.browser.chunk2.txt",
+      "bytes": 23749,
+      "sha256": "29d3b6234d5f739f2d217ef5da32b863366be890eaf7e7c97158e46a7bf1f8c6",
+      "inscription_id": "REPLACE_ME_CHUNK_2_i0"
+    }
+  ]
+}

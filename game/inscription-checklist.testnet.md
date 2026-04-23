@@ -1,8 +1,8 @@
 # PokeBells Gen 2 Testnet Inscription Checklist
 
-Generated: 2026-04-23T05:09:27.931Z
-Assets total: 527
-Tier 1 known bytes: 3318517 (≈ 3.16 MB)
+Generated: 2026-04-23T23:26:23.747Z
+Assets total: 529
+Tier 1 known bytes: 3330130 (≈ 3.18 MB)
 
 ## Workflow
 
@@ -38,7 +38,7 @@ Tier 1 known bytes: 3318517 (≈ 3.16 MB)
 
 502 PNGs — one entry per dex × {normal, shiny}. Full list in `inscription-checklist.testnet.json`.
 
-### 1d. ES modules (9, 849126 bytes)
+### 1d. ES modules (8, 436990 bytes)
 
 **Inscribe each as `.txt`** (the Inscriber rejects `.js`/`.mjs`).
 
@@ -47,12 +47,11 @@ Tier 1 known bytes: 3318517 (≈ 3.16 MB)
 | `capture_core` | `capture_core.txt` | 86712 | `0c6ac4f38ad2ec9b…` | `game/capture-core.mjs` |
 | `gen2_species` | `gen2_species.txt` | 88346 | `e24c4574657c4249…` | `game/gen2-species.mjs` |
 | `gen2_pc_storage` | `gen2_pc_storage.txt` | 6605 | `ad403c244a7157f0…` | `game/gen2-pc-storage.mjs` |
-| `pending_captures` | `pending_captures.txt` | 6996 | `13241ec13aeef7a8…` | `game/pending-captures.mjs` |
-| `wallet_adapter` | `wallet_adapter.txt` | 22658 | `e99656ea84e506fb…` | `game/wallet-adapter.mjs` |
+| `pending_captures` | `pending_captures.txt` | 10527 | `4c4612c8c21d25a0…` | `game/pending-captures.mjs` |
+| `wallet_adapter` | `wallet_adapter.txt` | 23440 | `c8f16cc540012cbc…` | `game/wallet-adapter.mjs` |
 | `signin_verify` | `signin_verify.txt` | 32220 | `4b8943e2585bc7de…` | `game/signin-verify.mjs` |
 | `pbrp_session_key` | `pbrp_session_key.txt` | 10017 | `d5c26054ee274bf2…` | `game/pbrp/session-key.mjs` |
-| `pokebells_inscriber` | `pokebells_inscriber.txt` | 423749 | `2655a1eaa7990492…` | `companion/pokebells/inscriber/pokebells-inscriber.browser.mjs` |
-| `shell` | `shell.txt` | 171823 | `fd8c39c4dc4eaa9d…` | `game/shell.js` |
+| `shell` | `shell.txt` | 179123 | `bd42340340681e5c…` | `game/shell.js` |
 
 ## Tier 2 — Aggregate manifests (fill tier-1 ids first)
 

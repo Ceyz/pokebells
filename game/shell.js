@@ -118,6 +118,7 @@ function resolveIndexerBaseUrl() {
 const POKEBALL_COOLDOWN_BLOCKS = 360;
 const POKEBALL_STORAGE_KEY = 'pokebells:pokeball:last_mint_block';
 const BLOCK_TIP_HEIGHT_TTL_MS = 30_000;
+const SRAM_PERSIST_DEBOUNCE_MS = 250;
 
 const state = {
   module: null,
@@ -1164,6 +1165,32 @@ async function persistCurrentExtRam(reason = 'emulator-update') {
   await writeStoredExtRamSnapshot(extRam, reason);
   state.sram.lastPersistMs = performance.now();
   return true;
+}
+
+function hasUnloadSensitiveState() {
+  return Boolean(
+    state.sram.pendingPersist
+    || state.capture.inFlight
+    || state.save.pending
+    || (state.wallet?.mintFlow?.phase && state.wallet.mintFlow.phase !== 'idle')
+    || state.ui.captureHandoff.payload
+    || state.ui.saveHandoff.record
+  );
+}
+
+function flushPendingLocalState(reason = 'pagehide') {
+  if (!state.sram.pendingPersist) return;
+  state.sram.pendingPersist = false;
+  persistCurrentExtRam(reason).catch((error) => {
+    log(`Emergency SRAM persist failed during ${reason}: ${error.message}`, 'warn');
+  });
+}
+
+function handleBeforeUnload(event) {
+  if (!hasUnloadSensitiveState()) return;
+  flushPendingLocalState('beforeunload');
+  event.preventDefault();
+  event.returnValue = '';
 }
 
 async function fetchBundledDevSave() {
@@ -3407,7 +3434,7 @@ function rafCallback(nowMs) {
     state.sram.pendingPersist = true;
   }
 
-  if (state.sram.pendingPersist && (nowMs - state.sram.lastPersistMs) > 1200) {
+  if (state.sram.pendingPersist && (nowMs - state.sram.lastPersistMs) > SRAM_PERSIST_DEBOUNCE_MS) {
     state.sram.pendingPersist = false;
     persistCurrentExtRam('emulator-save').catch((error) => {
       setPcSyncMessage(`SRAM persist failed: ${error.message}`);
@@ -3775,6 +3802,16 @@ async function run(action) {
 
 updateStorageStatus();
 
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    flushPendingLocalState('visibility-hidden');
+  }
+});
+window.addEventListener('pagehide', () => {
+  flushPendingLocalState('pagehide');
+});
+window.addEventListener('beforeunload', handleBeforeUnload);
+
 dom.loadManifest.addEventListener('click', () => {
   run(() => loadManifestAndBoot(false));
 });
@@ -3959,11 +3996,15 @@ async function pollInscriptionRegistered(indexerBase, kind, inscriptionId, opts 
 let inscriberModulePromise = null;
 async function loadInscriberModule() {
   if (!inscriberModulePromise) {
-    if (!window.PokeBellsBoot?.resolveModuleUrl) {
-      throw new Error('PokeBellsBoot.resolveModuleUrl is not available — boot.js v1.5 required');
+    // boot.js >= chunked-modules exposes loadModule(key). It handles both
+    // monolithic (single inscription) and chunked (N pieces concatenated
+    // client-side) modules transparently. The pokebells_inscriber bundle
+    // is 420+ KB so on inscription mode it's chunked into 3 pieces to fit
+    // under Bells' 400K WU standard-tx weight limit.
+    if (!window.PokeBellsBoot?.loadModule) {
+      throw new Error('PokeBellsBoot.loadModule is not available — boot.js v1.6+ required for chunked modules');
     }
-    const url = window.PokeBellsBoot.resolveModuleUrl('pokebells_inscriber');
-    inscriberModulePromise = import(/* @vite-ignore */ url);
+    inscriberModulePromise = window.PokeBellsBoot.loadModule('pokebells_inscriber');
   }
   return inscriberModulePromise;
 }
