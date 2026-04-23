@@ -80,6 +80,8 @@ game/indexer/src/gen2-species.mjs
 !game/capture-core.test.mjs
 !game/gen2-species.mjs
 !game/gen2-species.test.mjs
+!game/pending-captures.mjs
+!game/pending-captures.test.mjs
 !game/gen2-pc-storage.mjs
 !game/wallet-adapter.mjs
 !game/wallet-adapter.test.mjs

@@ -739,16 +739,56 @@
         <button id="capture-handoff-cancel" data-danger="true">Cancel mint</button>
         <button id="capture-handoff-resume">Resume game</button>
         <!--
-          The "Mint here (direct)" button is staged in HTML + handler but
-          hidden until the v1.5 capture-producer refactor lands in shell.js
-          (next commit). Showing a button that surfaces "coming next" is
-          worse UX than hiding it entirely. Re-enable by removing the
-          `hidden` attributes once the pipeline is wired.
+          showCaptureHandoff() in shell.js toggles the `hidden` attribute
+          based on detectDirectMintCapability(): button shows iff
+          window.nintondo.signPsbt is reachable. Without a wallet the
+          user sees only "Copy JSON + open companion" + manual fallback
+          (Step 4 in SHELL-V1.5-PIPELINE.md, future commit).
         -->
-        <button id="capture-handoff-mint-direct" data-primary="true" hidden>Mint here (direct)</button>
+        <button id="capture-handoff-mint-direct" data-primary="true">Mint here (direct)</button>
         <button id="capture-handoff-open" data-primary="true">Copy JSON + open companion</button>
       </div>
       <p id="capture-handoff-mint-status" class="subline muted" style="margin-top:8px;" hidden></p>
+      <p class="subline muted" style="margin-top:6px; font-size: 11px;">
+        <strong>Mint here</strong> signs via your wallet on this tab (no bellforge, no paste, ~4 wallet popups).
+        <strong>Copy + companion</strong> routes through bellforge.app for a richer UI.
+      </p>
+      <!--
+        Manual fallback (SHELL-V1.5-PIPELINE.md Step 4). Always exposed
+        as <details>; hidden until showCaptureHandoff opens it. Two-step
+        flow that survives a missing wallet AND a missing indexer — the
+        on-chain inscriptions are always canonical, indexer notification
+        is best-effort and queued.
+      -->
+      <details id="capture-handoff-manual" style="margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px;">
+        <summary style="cursor: pointer; font-size: 12px; color: var(--muted);">
+          Manual mint flow (no wallet / pure-inscription mode)
+        </summary>
+        <div style="margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px;">
+          <div style="margin-bottom: 12px;">
+            <p style="margin: 0 0 6px;"><strong>Step 1 — Inscribe capture_commit</strong></p>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              <button id="capture-handoff-manual-copy-commit" type="button">Copy commit JSON</button>
+              <a id="capture-handoff-manual-open-inscriber-1" href="https://nintondo.io/inscriber" target="_blank" rel="noopener" style="align-self: center;">Open Inscriber ↗</a>
+            </div>
+            <input id="capture-handoff-manual-commit-id" type="text" placeholder="Paste commit inscription id (64hex+i0)"
+                   autocomplete="off" spellcheck="false"
+                   style="width: 100%; margin-top: 8px; padding: 6px 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-family: monospace; font-size: 11px;">
+            <p id="capture-handoff-manual-commit-status" class="subline muted" style="margin-top: 4px; font-size: 11px;"></p>
+          </div>
+          <div id="capture-handoff-manual-step-2" style="opacity: 0.45;">
+            <p style="margin: 0 0 6px;"><strong>Step 2 — Inscribe Pokémon mint</strong></p>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              <button id="capture-handoff-manual-copy-mint" type="button" disabled>Copy mint JSON</button>
+              <a id="capture-handoff-manual-open-inscriber-2" href="https://nintondo.io/inscriber" target="_blank" rel="noopener" style="align-self: center;">Open Inscriber ↗</a>
+            </div>
+            <input id="capture-handoff-manual-mint-id" type="text" placeholder="Paste mint inscription id (64hex+i0)"
+                   autocomplete="off" spellcheck="false" disabled
+                   style="width: 100%; margin-top: 8px; padding: 6px 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-family: monospace; font-size: 11px;">
+            <p id="capture-handoff-manual-mint-status" class="subline muted" style="margin-top: 4px; font-size: 11px;"></p>
+          </div>
+        </div>
+      </details>
     </div>
   </div>
 

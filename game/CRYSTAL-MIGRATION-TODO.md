@@ -132,6 +132,43 @@ Port plan (order matters):
 - [ ] Indexer: `block_hash_at_capture` must be within K blocks of inscription
       block (staleness defense).
 - [ ] Indexer: `game_rom_sha256` must match canonical pinned in root inscription.
+- [ ] **SEC-ROLLBACK-1: unique/static encounter rollback defense.**
+      A player can otherwise mint Lugia/Ho-Oh/Suicune/starter/gift/trade,
+      clear or restore local IDB/save state, return to the pre-encounter point,
+      and mint the same one-time encounter again with a fresh valid
+      commit+mint. Add a canonical `encounter_key` derived by the validator
+      from the RAM witness + Crystal event/map context, then enforce
+      `UNIQUE(network, signed_in_wallet, game_rom_sha256, encounter_key)` for
+      one-time encounters. Until this lands, block legendary/static/gift/trade
+      mints from the mainnet collection or mark them invalid.
+- [ ] **SEC-RNG-1: selective mint / shiny farming disclosure or defense.**
+      A player can abandon bad catches and only mint rare/perfect rolls unless
+      the game enforces a mandatory mint/commit path for every qualifying catch.
+      This does not create fake Pokemon, but it can make public odds like
+      "1/8192 shiny" economically misleading. Decide before mainnet: either
+      (A) disclose that mints are valid but adversarially selected, or
+      (B) enforce stronger save-chain / mandatory-capture commitments so skipped
+      bad rolls are visible.
+- [ ] **SEC-PENDING-1: capture quarantine until mint or release.**
+      After an in-game catch, the shell must pause/quarantine progression until
+      the pending capture reaches `mint_confirmed` or `cancelled`. If the user
+      closes the tab, clears UI state, refuses wallet prompts, or never pastes
+      manual ids, the captured Pokemon must not remain freely playable in the
+      party. Required behavior: block save export/chain-save, block emulator
+      resume past the handoff, and on cancel run the same release/remove logic
+      for every pre-`mint_broadcast` state.
+- [ ] **SEC-PARTIAL-BROADCAST-1: persist txids after each broadcast.**
+      Direct mint uses two protocol txs per inscription (fund + reveal). If the
+      fund tx broadcasts and the reveal tx fails, IDB must already contain the
+      fund txid and must not rewind to a state that can rebuild/rebroadcast from
+      scratch. Same for mint fund/reveal. Add tests for network failure after
+      fund broadcast and before reveal broadcast.
+- [ ] **SEC-PRIVATE-REVEAL-1: protect pending preimages from IDB loss.**
+      If a capture_commit is inscribed but `private_reveal` is lost before the
+      mint inscription, the commit becomes orphaned and the Pokemon cannot be
+      finalized. Direct flow should minimize the gap, warn before navigation,
+      and offer an encrypted export/backup of pending rows for users who choose
+      manual mode.
 - [ ] Reveal inscription UI (companion): read IndexedDB `captureReveals` store
       keyed by attestation → build + copy reveal JSON → open Inscriber →
       auto-register via POST /api/reveals.
@@ -139,10 +176,72 @@ Port plan (order matters):
       signMessage — still unprobed on Bells, see memory
       nintondo_signmessage_format.md).
 - [ ] Release/burn op:"release" inscription (optional, soft-delete).
+- [ ] **SEC-OWNER-OPS-1: post-mint ops must be signed by current owner.**
+      Future `op:"update"`, `op:"evolve"`, and `op:"release"` cannot trust
+      the original `mint.signed_in_wallet` forever: after a sale, the original
+      minter must not be able to evolve/release/grief a Pokemon they no longer
+      own. Validator must verify the signer controls the current inscription
+      output at the op's block height (or the latest indexed owner), not just
+      the original capture wallet.
 - [ ] Encounter table `(species, map, level)` legality check (data extraction
       from pokecrystal).
 - [ ] Learnset legality check at level (re-enable; data extraction from
       pokecrystal evos_attacks).
+- [ ] **SEC-ENCOUNTER-2: classify encounter source, not just species/map/level.**
+      Wild grass/surf/fish/headbutt, static legends, starter choices, gifts,
+      in-game trades, eggs, roamers, and scripted/event Pokemon have different
+      legality and uniqueness rules. The mint validator should derive
+      `encounter_type` + `encounter_key` and reject impossible combinations
+      (e.g. shiny Mewtwo in Crystal, duplicate one-time static, gift Pokemon
+      at wrong level, trade mon with impossible OT/caught data).
+- [ ] **SEC-SAVECHAIN-1: decide whether save-head lineage is required.**
+      `encounter_key` uniqueness covers one-time encounters, but full rollback
+      resistance across all gameplay would require a save-chain
+      (`parent_save_id` -> capture -> new save head). This is heavier UX/fees.
+      Before mainnet, explicitly choose: (A) no save-chain, normal wild farming
+      is allowed; only one-time encounters dedupe, or (B) save-chain for stricter
+      worlds.
+- [ ] **SEC-RUNTIME-1: pin boot/runtime/module hashes.**
+      `game_rom_sha256` alone proves the ROM bytes named in the commit, but not
+      that the shell/emulator/capture code used to produce the witness was the
+      canonical on-chain bundle. Pin `boot.js`, `shell.js`,
+      `capture-core.mjs`, emulator runtime, and `pokebells_inscriber` hashes in
+      the root manifest; validator/indexer should reject records claiming an
+      unknown `root_manifest_id` or module set.
+- [ ] **SEC-PSBT-1: direct-mint PSBT safety checks.**
+      The bridge/direct mint flow has wallet signing power. Before mainnet,
+      verify every generated PSBT client-side before showing wallet popups:
+      fee cap, expected number of outputs, inscription output to the user's
+      address, change output back to the user's address, no unexpected external
+      payments, and sane fee-rate bounds. Display a concise fee/output summary
+      so a compromised host or builder bug cannot silently drain UTXOs.
+- [ ] **SEC-REORG-1: confirmation depth + reorg handling.**
+      A mint should become collection-canonical only after a configured
+      confirmation depth. Indexer must handle reorgs by rolling back commits,
+      mints, and first-valid-per-commit ordering if a previously winning mint
+      disappears from the best chain.
+- [ ] **SEC-COLLECTION-1: parent-gated official collection.**
+      Do not let marketplaces infer "official PokeBells" from any JSON with
+      `p:"pokebells"` and `op:"mint"`. A fake but invalid Mewtwo JSON might
+      still render in generic inscription search. The official collection must
+      be gated by a `p:pokebells-collection` parent / canonical ids feed that
+      includes only mints passing the validator.
+- [ ] **SEC-RACE-1: cross-tab / double-click mint lock.**
+      Multiple tabs or rapid clicks can try to mint the same pending capture.
+      Add an IDB/localStorage lock keyed by attestation with a short lease, and
+      refuse a second direct/manual pipeline while any txid or inscription id is
+      present.
+- [ ] **SEC-RTC-1: time/RTC-aware legality.**
+      Crystal has time/day-dependent encounters. If we use real CET RTC sync,
+      the capture witness must include enough RTC state for the validator to
+      verify morning/day/night encounter tables instead of accepting any
+      time-gated species at any wall-clock time.
+- [ ] **SEC-DOS-1: validator/indexer abuse limits.**
+      Attackers can spam malformed or oversized inscriptions to burn Workers/D1
+      budget or slow canonical indexing. Add payload size caps before JSON
+      parse, rate limits per IP/wallet, fast schema rejection before expensive
+      RAM/sprite checks, bounded ingestion logs, and a queue/retry model for
+      backfills.
 - [ ] Real-time CET RTC sync in shell.js: write MBC3 RTC registers from JS
       on emulator boot so Crystal's in-game clock reflects real CET time.
 - [ ] Local smoke test: run the shell with `?manifest=pokebells`, load Crystal

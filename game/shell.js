@@ -28,19 +28,26 @@ const {
   PARTY_OFFSETS,
   RAM_ADDRS,
   SRAM_TOTAL_BYTE_LENGTH,
+  buildCaptureCommitRecord,
   buildCaptureProvenance,
   buildCapturedPokemonRecord,
+  buildPokemonMintRecord,
   buildRevealRecord,
   buildSaveSnapshotRecord,
   buildSpriteImageResolver,
   byteToHex,
   catchChancePercent,
   computeCatchChance,
+  decodeBase64,
+  isGen2Shiny,
   parseGbcDvs,
+  parsePartySlotFromSnapshot,
   readSramSnapshot,
   readWord,
   statusNameFromByte,
+  validateCaptureCommitRecord,
   validateCapturedPokemonRecord,
+  validatePokemonMintRecord,
   wordToHex,
   writeSramSnapshot,
 } = core;
@@ -132,6 +139,12 @@ const state = {
       roms: new Map(),
       chunks: new Map(),
       saves: new Map(),
+      // v1.4 legacy: per-attestation { ivs, salt, ram_snapshot }
+      // preimage cache used by buildRevealRecord. Read-only in v1.5.
+      captureReveals: new Map(),
+      // v1.5 capture-to-mint state machine — see SHELL-V1.5-PIPELINE.md.
+      // Each row = one in-flight capture, keyed by attestation.
+      pendingCaptures: new Map(),
     },
   },
   gb: null,
@@ -319,6 +332,14 @@ const dom = {
     cancel: document.getElementById('capture-handoff-cancel'),
     mintDirect: document.getElementById('capture-handoff-mint-direct'),
     mintStatus: document.getElementById('capture-handoff-mint-status'),
+    manualSection: document.getElementById('capture-handoff-manual'),
+    manualCopyCommit: document.getElementById('capture-handoff-manual-copy-commit'),
+    manualCommitId: document.getElementById('capture-handoff-manual-commit-id'),
+    manualCommitStatus: document.getElementById('capture-handoff-manual-commit-status'),
+    manualStep2: document.getElementById('capture-handoff-manual-step-2'),
+    manualCopyMint: document.getElementById('capture-handoff-manual-copy-mint'),
+    manualMintId: document.getElementById('capture-handoff-manual-mint-id'),
+    manualMintStatus: document.getElementById('capture-handoff-manual-mint-status'),
   },
 };
 
@@ -728,7 +749,7 @@ function openDb() {
 
       let request;
       try {
-        request = indexedDB.open('pokebells-phase1', 3);
+        request = indexedDB.open('pokebells-phase1', 4);
       } catch (error) {
         noteStorageFallback(error);
         resolve(createMemoryDb());
@@ -747,10 +768,17 @@ function openDb() {
           db.createObjectStore('saves', { keyPath: 'key' });
         }
         // captureReveals stores the IV + salt + ram_snapshot pre-image for
-        // each capture so the op:"reveal" inscription can be built later.
-        // Keyed by the capture's attestation (stable hex, unique per capture).
+        // each v1.4 capture so the op:"reveal" inscription can be built
+        // later. Read-only in v1.5 (kept for legacy testnet records);
+        // v1.5 captures populate `pendingCaptures` instead.
         if (!db.objectStoreNames.contains('captureReveals')) {
           db.createObjectStore('captureReveals', { keyPath: 'attestation' });
+        }
+        // v1.5 capture-to-mint state machine. One row per in-flight
+        // capture, keyed by attestation. Drives the "Pending mints"
+        // panel + boot-time resume per SHELL-V1.5-PIPELINE.md.
+        if (!db.objectStoreNames.contains('pendingCaptures')) {
+          db.createObjectStore('pendingCaptures', { keyPath: 'attestation' });
         }
       };
       request.onsuccess = () => {
@@ -771,6 +799,18 @@ function openDb() {
   return state.dbPromise;
 }
 
+// Map of store name → keyPath used by the memory-mode fallback. IDB
+// itself reads the keyPath from its own schema; the fallback Map needs
+// the lookup since `Map.set(key, value)` requires extracting the key
+// explicitly.
+const IDB_STORE_KEY_PATHS = {
+  roms: 'key',
+  chunks: 'key',
+  saves: 'key',
+  captureReveals: 'attestation',
+  pendingCaptures: 'attestation',
+};
+
 function dbGet(db, storeName, key) {
   if (isMemoryDb(db)) {
     return Promise.resolve(cloneStoredRecord(db.stores[storeName].get(key) ?? null));
@@ -784,12 +824,40 @@ function dbGet(db, storeName, key) {
 
 function dbPut(db, storeName, value) {
   if (isMemoryDb(db)) {
-    db.stores[storeName].set(value.key, cloneStoredRecord(value));
+    const keyPath = IDB_STORE_KEY_PATHS[storeName] ?? 'key';
+    const key = value?.[keyPath];
+    if (key == null) {
+      return Promise.reject(new Error(`dbPut: ${storeName} record missing keyPath "${keyPath}"`));
+    }
+    db.stores[storeName].set(key, cloneStoredRecord(value));
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
     const request = db.transaction(storeName, 'readwrite').objectStore(storeName).put(value);
     request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function dbDelete(db, storeName, key) {
+  if (isMemoryDb(db)) {
+    db.stores[storeName].delete(key);
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(storeName, 'readwrite').objectStore(storeName).delete(key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function dbGetAll(db, storeName) {
+  if (isMemoryDb(db)) {
+    return Promise.resolve(Array.from(db.stores[storeName].values()).map(cloneStoredRecord));
+  }
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+    request.onsuccess = () => resolve(request.result ?? []);
     request.onerror = () => reject(request.error);
   });
 }
@@ -1990,8 +2058,35 @@ function showCaptureHandoff(payload, options = {}) {
   state.ui.captureHandoff.mandatory = Boolean(options.mandatory);
   state.ui.captureHandoff.ivsMasked = options.ivsMasked !== false;
   renderCaptureHandoffModal(payload);
+
+  // v1.5: surface "Mint here (direct)" only when window.nintondo.signPsbt
+  // is reachable. Without it, we keep the button hidden and let the user
+  // fall back to "Copy JSON + open companion" — manual fallback Step 1/
+  // Step 2 lands in the next pass for the no-companion / no-wallet
+  // edge case.
+  if (dom.captureHandoffModal.mintDirect) {
+    const cap = detectDirectMintCapability();
+    dom.captureHandoffModal.mintDirect.hidden = !cap.canDirectMint;
+    dom.captureHandoffModal.mintDirect.disabled = false;
+  }
+  if (dom.captureHandoffModal.mintStatus) {
+    dom.captureHandoffModal.mintStatus.hidden = true;
+    dom.captureHandoffModal.mintStatus.textContent = '';
+  }
+
+  // Manual fallback panel — populate from the persisted pending row so
+  // a re-opened modal resumes at the correct step. Best-effort: if the
+  // row isn't found yet (race during the producer write), the user can
+  // still copy the commit JSON because the panel reads the row again
+  // on click.
+  resetManualFallbackPanel(payload?.attestation).catch(() => {});
+
   dom.captureHandoffModal.root.classList.remove('hidden');
-  dom.captureHandoffModal.open.focus({ preventScroll: true });
+  // Focus the primary action that's currently visible.
+  const primaryFocus = (dom.captureHandoffModal.mintDirect && !dom.captureHandoffModal.mintDirect.hidden)
+    ? dom.captureHandoffModal.mintDirect
+    : dom.captureHandoffModal.open;
+  primaryFocus.focus({ preventScroll: true });
   setStatus('emulator', state.ui.captureHandoff.mandatory
     ? 'Paused — starter mint required'
     : 'Paused for mint');
@@ -2555,6 +2650,159 @@ function resolveNametag() {
   return sanitizeDisplayName(raw) || nametagState.fallback;
 }
 
+// ============================================================================
+// Schema v1.5 capture-to-mint state machine — uses pending-captures.mjs
+// ============================================================================
+// State machine constants + helpers come from window.PokeBellsPendingCaptures
+// (set by game/pending-captures.mjs which boot.js loads ahead of shell.js).
+// Pure JS, tested in game/pending-captures.test.mjs. Six invariants
+// enforced there: see SHELL-V1.5-PIPELINE.md.
+
+const pendingCapturesTools = (typeof window !== 'undefined'
+  && window.PokeBellsPendingCaptures)
+  ?? (() => { throw new Error('PokeBellsPendingCaptures missing — boot.js must load pending-captures.mjs before shell.js'); })();
+
+const {
+  PENDING_CAPTURE_STATUSES,
+  PENDING_CAPTURE_TERMINAL,
+  PENDING_CAPTURE_MINT_LOCKED,
+  PENDING_CAPTURE_TRANSITIONS,
+  isValidPendingStatus,
+  isAllowedPendingTransition,
+  assertPendingTransition,
+  makePendingCaptureRow,
+  cancelAllowed,
+} = pendingCapturesTools;
+
+// Queue helpers — pure IDB updates, never throw on indexer failures.
+
+async function enqueueIndexerRegistration(attestation, kind) {
+  if (kind !== 'commit' && kind !== 'mint') {
+    throw new Error(`enqueueIndexerRegistration: unknown kind "${kind}"`);
+  }
+  const row = await getPendingCapture(attestation);
+  if (!row) return null;
+  const queue = Array.isArray(row.pending_registrations) ? row.pending_registrations : [];
+  if (queue.includes(kind)) return row;
+  const next = {
+    ...row,
+    pending_registrations: [...queue, kind],
+    updated_at: new Date().toISOString(),
+  };
+  await persistPendingCapture(next);
+  return next;
+}
+
+async function dequeueIndexerRegistration(attestation, kind) {
+  const row = await getPendingCapture(attestation);
+  if (!row) return null;
+  const queue = Array.isArray(row.pending_registrations) ? row.pending_registrations : [];
+  if (!queue.includes(kind)) return row;
+  const next = {
+    ...row,
+    pending_registrations: queue.filter((k) => k !== kind),
+    updated_at: new Date().toISOString(),
+  };
+  await persistPendingCapture(next);
+  return next;
+}
+
+// Best-effort indexer notify. Returns true if 2xx response, false on
+// any failure. Failure path appends 'commit'/'mint' to the row's
+// pending_registrations queue so a future retry can drain it without
+// blocking the user.
+async function notifyIndexerOfInscription({ attestation, kind, inscriptionId, network }) {
+  const indexerBase = indexerBaseFor(network);
+  const path = kind === 'mint' ? '/api/mints' : '/api/captures';
+  try {
+    const r = await fetch(`${indexerBase}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inscription_id: inscriptionId, network }),
+    });
+    if (!r.ok) {
+      await enqueueIndexerRegistration(attestation, kind);
+      return false;
+    }
+    await dequeueIndexerRegistration(attestation, kind);
+    return true;
+  } catch {
+    await enqueueIndexerRegistration(attestation, kind);
+    return false;
+  }
+}
+
+async function persistPendingCapture(row) {
+  const db = await openDb();
+  await dbPut(db, 'pendingCaptures', row);
+}
+
+async function getPendingCapture(attestation) {
+  if (!attestation) return null;
+  const db = await openDb();
+  return dbGet(db, 'pendingCaptures', String(attestation).toLowerCase());
+}
+
+async function listPendingCaptures() {
+  const db = await openDb();
+  return dbGetAll(db, 'pendingCaptures');
+}
+
+// Enforced state transition. Throws on illegal moves so a buggy caller
+// can't silently land in an impossible state. The `partial` callback
+// receives a clone of the existing row and may mutate any non-status
+// fields (txids, last_error, retry_count, etc.) before the new status
+// is stamped on. Pure transition logic delegated to the canonical
+// pending-captures.mjs (assertPendingTransition); this wrapper is the
+// IDB-side effect — read existing, validate transition, persist next.
+async function transitionPendingCapture(attestation, nextStatus, partial = null) {
+  const existing = await getPendingCapture(attestation);
+  if (!existing) {
+    throw new Error(`no pendingCaptures row for attestation ${attestation}`);
+  }
+  const next = assertPendingTransition(existing, nextStatus, partial);
+  await persistPendingCapture(next);
+  return next;
+}
+
+// Patch fields on a pendingCapture row WITHOUT changing status. Used
+// during runDirectMintFlow to persist intermediate artifacts (fund_txid
+// after fund broadcast succeeds, reveal_txid after reveal broadcast
+// succeeds, last_error during recoverable failures) so a tab refresh
+// or process kill never loses track of an in-flight broadcast.
+//
+// Status changes still go through transitionPendingCapture(); patches
+// are for intermediate book-keeping only.
+async function patchPendingCapture(attestation, partial) {
+  const existing = await getPendingCapture(attestation);
+  if (!existing) {
+    throw new Error(`no pendingCaptures row for attestation ${attestation}`);
+  }
+  const next = {
+    ...existing,
+    ...(partial ?? {}),
+    updated_at: new Date().toISOString(),
+  };
+  await persistPendingCapture(next);
+  return next;
+}
+
+// Cancel helper enforces cancel-matrix invariant 4: from mint_broadcast +
+// mint_confirmed states, cancel is forbidden. Caller must also release
+// the in-game Pokémon (universal rule from SHELL-V1.5-PIPELINE.md cancel
+// matrix) — that part is wired in the modal handler, not here, because
+// the state machine doesn't know about the emulator.
+async function cancelPendingCapture(attestation) {
+  const existing = await getPendingCapture(attestation);
+  if (!existing) return null;
+  if (PENDING_CAPTURE_MINT_LOCKED.has(existing.status)) {
+    throw new Error(
+      `cancel forbidden in status "${existing.status}" — mint already broadcasting/confirmed`,
+    );
+  }
+  return transitionPendingCapture(attestation, 'cancelled');
+}
+
 // ---- Reveal builder API (exposed for devtools + companion consumers) ----
 //
 // Captures at schema 1.4 commit to IVs but don't publish them. To complete
@@ -2823,84 +3071,109 @@ async function onPokemonCaught(slotIndex, options = {}) {
     }
 
     const sessionSequenceNumber = state.capture.sessionSequenceNumber + 1;
-    // Under schema 1.4 the provenance step also computes the IV commitment +
-    // ram-snapshot hash, and returns the raw values in a `privateReveal`
-    // side-channel. shell.js persists that to IndexedDB keyed by attestation
-    // so the user can publish op:"reveal" later from any machine that holds
-    // the same wallet + local snapshot DB.
-    const slotBase = RAM_ADDRS.teamSlotBase + ((slotIndex - 1) * RAM_ADDRS.teamSlotSize);
-    const atkDefDv = state.gb.readByte(slotBase + PARTY_OFFSETS.attackDefenseDv);
-    const spdSpcDv = state.gb.readByte(slotBase + PARTY_OFFSETS.speedSpecialDv);
-    const ivsAtCapture = parseGbcDvs(atkDefDv, spdSpcDv);
-    const evsAtCapture = {
-      hp: readWord(state.gb.readByte, slotBase + PARTY_OFFSETS.hpExp),
-      atk: readWord(state.gb.readByte, slotBase + PARTY_OFFSETS.atkExp),
-      def: readWord(state.gb.readByte, slotBase + PARTY_OFFSETS.defExp),
-      spe: readWord(state.gb.readByte, slotBase + PARTY_OFFSETS.speExp),
-      spc: readWord(state.gb.readByte, slotBase + PARTY_OFFSETS.spcExp),
+
+    // v1.5 capture producer (replaces v1.4 buildCaptureProvenance +
+    // buildCapturedPokemonRecord). The commit body is opaque (no
+    // species/level), the IVs+EVs+RAM stay in privateReveal until
+    // op:"mint" is published. Per SHELL-V1.5-PIPELINE.md invariants:
+    //   - 1: only op:"mint" makes a Pokémon canonical
+    //   - 2: this capture is "pending_commit" — not yet a Pokémon NFT
+    const romSha256 = state.manifest?.rom?.sha256;
+    if (typeof romSha256 !== 'string' || romSha256.length !== 64) {
+      throw new Error('manifest.rom.sha256 missing — cannot build v1.5 capture_commit');
+    }
+    const { commitRecord, privateReveal } = await buildCaptureCommitRecord(
+      state.gb.readByte,
+      {
+        network: state.manifest?.network,
+        signedInWallet,
+        sessionSequenceNumber,
+        partySlotIndex: slotIndex,
+        writeByte: state.gb.writeByte,
+        romSha256,
+      },
+    );
+
+    // Standalone validation of the commit (recompute attestation, schema
+    // shape, etc.). Runs on the same canonical validator the indexer
+    // uses post-deploy.
+    const commitValidation = await validateCaptureCommitRecord(commitRecord);
+    if (!commitValidation.ok) {
+      throw new Error(`commit invalid: ${commitValidation.error}`);
+    }
+
+    // Re-derive a few fields from the freshly-captured snapshot for the
+    // modal preview. None of these are inscribed — only species_id /
+    // level / IVs in the eventual mint inscription are canonical, and
+    // those go through buildPokemonMintRecord (which itself parses the
+    // snapshot, never trusts caller-supplied values).
+    const ramBytes = decodeBase64(privateReveal.ram_snapshot_base64);
+    const slot = parsePartySlotFromSnapshot(ramBytes, slotIndex);
+    const speciesInfo = getSpeciesByInternalId(state.speciesCatalog, slot.internalSpeciesId);
+    const previewSpeciesName = speciesInfo?.name ?? `Species ${slot.internalSpeciesId}`;
+
+    // The "view" object substitutes for the legacy v1.4 capture payload
+    // in the modal renderer + capture-card UI. Field shape matches what
+    // renderCaptureHandoffModal / renderCapturePayload already read so
+    // we don't have to refactor every consumer at once. NOT inscribed.
+    const view = {
+      schema_version: '1.5',
+      op: 'capture_commit',
+      // v1.5 commit identity (these are real fields on the commit body):
+      attestation: commitRecord.attestation,
+      attestation_scheme: commitRecord.attestation_scheme,
+      block_hash_at_capture: commitRecord.block_hash_at_capture,
+      signed_in_wallet: commitRecord.signed_in_wallet,
+      capture_network: commitRecord.capture_network,
+      session_sequence_number: commitRecord.session_sequence_number,
+      ivs_commitment: commitRecord.ivs_commitment,
+      ram_snapshot_hash: commitRecord.ram_snapshot_hash,
+      svbk_at_capture: commitRecord.svbk_at_capture,
+      party_slot_index: slotIndex,
+      // Preview-only fields (never inscribed; UI display only):
+      species_id: speciesInfo?.dexNo ?? slot.internalSpeciesId,
+      species_name: previewSpeciesName,
+      level: slot.level,
+      catch_rate: speciesInfo?.catchRate ?? null,
+      // For wallet-adapter quote/mint button compat (v1.4 path is the
+      // legacy "Copy + open companion" route; new direct mint path uses
+      // the pendingCaptures row instead):
+      inscription_id: null,
+      context: {
+        slot_index: slotIndex,
+        slot_base: wordToHex(RAM_ADDRS.teamSlotBase + ((slotIndex - 1) * RAM_ADDRS.teamSlotSize)),
+        live_enemy_catch_rate: state.gb.readByte(RAM_ADDRS.enemyCatchRate),
+        live_catch_chance: state.capture.lastChance === null
+          ? null
+          : Number(state.capture.lastChance.toFixed(4)),
+        live_catch_percent: state.capture.lastChance === null
+          ? null
+          : Number(catchChancePercent(state.capture.lastChance).toFixed(2)),
+      },
     };
 
-    const captureProvenance = await buildCaptureProvenance(state.gb.readByte, {
-      network: state.manifest?.network,
-      signedInWallet,
-      sessionSequenceNumber,
-      writeByte: state.gb.writeByte,
-      ivs: ivsAtCapture,
-    });
-    // Enrich the private reveal payload with EVs (hidden from capture record
-    // but published at reveal time).
-    captureProvenance.privateReveal.evs = evsAtCapture;
-
-    const payload = buildCapturedPokemonRecord(state.gb.readByte, {
-      slotIndex,
-      romName: state.manifest?.rom?.name ?? null,
-      captureNetwork: state.manifest?.network ?? null,
-      captureProvenance,
-      speciesResolver(internalSpeciesId) {
-        return getSpeciesByInternalId(state.speciesCatalog, internalSpeciesId);
-      },
-      resolveSpriteImage: state.spritePack.resolver,
-    });
-
-    payload.context.live_enemy_catch_rate = state.gb.readByte(RAM_ADDRS.enemyCatchRate);
-    payload.context.live_catch_chance = state.capture.lastChance === null ? null : Number(state.capture.lastChance.toFixed(4));
-    payload.context.live_catch_percent = state.capture.lastChance === null
-      ? null
-      : Number(catchChancePercent(state.capture.lastChance).toFixed(2));
-
-    const validation = await validateCapturedPokemonRecord(payload, {
-      speciesCatalog: state.speciesCatalog,
-      verifyProvenance: true,
-      requireSignedWallet: true,
-    });
-    if (!validation.ok) {
-      throw new Error(validation.error);
-    }
-
     state.capture.sessionSequenceNumber = sessionSequenceNumber;
-    state.capture.lastPayload = payload;
-    // Persist the private reveal preimages keyed by attestation. Required so
-    // the op:"reveal" inscription can be generated later (post-mint) without
-    // re-running capture. Includes EVs at capture time — subsequent updates
-    // inscribe deltas via signed op:"update" records (future work).
+    state.capture.lastPayload = view;
+
+    // Persist the v1.5 pending capture row (state machine entry point).
+    // shell.js boot-time resume will re-surface this in the "Pending
+    // mints" panel if the user closes the tab before completing mint.
     try {
-      const db = await openDb();
-      await dbPut(db, 'captureReveals', {
-        attestation: payload.attestation,
-        capture_record: payload,
-        private_reveal: captureProvenance.privateReveal,
-        ivs_at_capture: ivsAtCapture,
-        evs_at_capture: evsAtCapture,
-        slot_index: slotIndex,
-        created_at: new Date().toISOString(),
-        wallet: signedInWallet,
-        capture_inscription_id: null,
-        reveal_inscription_id: null,
+      const pendingRow = makePendingCaptureRow({
+        commitRecord,
+        privateReveal,
+        partySlotIndex: slotIndex,
+        signedInWallet,
+        network: commitRecord.capture_network,
+        previewSpeciesName,
+        previewLevel: slot.level,
       });
+      await persistPendingCapture(pendingRow);
     } catch (error) {
-      log(`Failed to persist reveal preimage: ${error.message}`, 'warn');
+      log(`Failed to persist pending capture: ${error.message}`, 'warn');
     }
-    renderCapturePayload(payload);
+
+    renderCapturePayload(view);
     updateMintButtonState();
     refreshMintQuote().catch((error) => {
       log(error.message, 'bad');
@@ -2908,10 +3181,10 @@ async function onPokemonCaught(slotIndex, options = {}) {
     persistCurrentExtRam('capture-handoff').catch((error) => {
       log(`SRAM persist before mint handoff failed: ${error.message}`, 'warn');
     });
-    showCaptureHandoff(payload, { slotIndex, mandatory, ivsMasked: true });
+    showCaptureHandoff(view, { slotIndex, mandatory, ivsMasked: true });
 
     log(
-      `Capture detected: slot ${slotIndex}, ${payload.species_name ?? payload.species}, level ${payload.level}, catch_rate ${payload.catch_rate}, block ${payload.block_hash_at_capture.slice(0, 12)}...`,
+      `Capture (v1.5): slot ${slotIndex} ${previewSpeciesName} Lv${slot.level} → pending_commit, attestation ${view.attestation.slice(0, 12)}...`,
       'capture',
     );
     setStatus('watch', `Captured slot ${slotIndex}`);
@@ -3514,33 +3787,447 @@ dom.captureHandoffModal.open.addEventListener('click', () => {
     });
 });
 
-// "Mint here (direct)" — v1.5 client-side mint via window.nintondo +
-// pokebells-inscriber bundle. Two inscriptions (capture_commit + mint),
-// four wallet popups on P2PKH, zero paste. Falls back to the "Copy JSON
-// + open companion" path if the wallet isn't injected or the bundle
-// fails to load.
-//
-// FULL PIPELINE wiring lands in the next commit: refactors shell's
-// capture producer to emit v1.5 capture_commit + privateReveal (instead
-// of v1.4 capture), then drives the inscriber for both inscriptions +
-// POSTs to /api/captures + /api/mints on success.
-//
-// For now the handler surfaces a clear "coming next" status rather than
-// silently no-oping. Keeps the UI honest while we stage the refactor.
-if (dom.captureHandoffModal.mintDirect) {
-  dom.captureHandoffModal.mintDirect.addEventListener('click', () => {
-    const statusEl = dom.captureHandoffModal.mintStatus;
-    if (statusEl) {
-      statusEl.textContent =
-        'Direct mint pipeline lands in the next commit. For now, click '
-        + '"Copy JSON + open companion" — that route ships the same '
-        + 'inscription via bellforge without leaving your wallet.';
-      statusEl.className = 'subline warn';
+// ============================================================================
+// Direct mint pipeline (v1.5 client-side ordinals via window.nintondo)
+// ============================================================================
+// Walks the SHELL-V1.5-PIPELINE.md state machine for a single pending
+// capture: pending_commit → commit_broadcast → commit_confirmed →
+// pending_mint → mint_broadcast → mint_confirmed. Each transition is
+// wrapped in transitionPendingCapture() so the invariants in the spec
+// can't be silently violated. Errors at any step keep the row in its
+// last successful state with last_error populated for retry.
+
+const ELECTRS_BASES_FOR_MINT = {
+  'bells-mainnet': 'https://api.nintondo.io',
+  'bells-testnet': 'https://bells-testnet-api.nintondo.io',
+};
+
+function electrsBaseFor(network) {
+  return ELECTRS_BASES_FOR_MINT[network] ?? ELECTRS_BASES_FOR_MINT['bells-testnet'];
+}
+
+function indexerBaseFor(_network) {
+  // The companion's INDEXER_BASE_FALLBACKS[0] is the one currently live.
+  // shell.js used to redirect to companion to register; with v1.5 direct
+  // mint we POST ourselves. URL is hardcoded for now; resilience model
+  // (memory: resilience_model.md) will replace with on-chain
+  // p:pokebells-collection registry post-mainnet.
+  return 'https://pokebells-indexer.ceyzcrypto.workers.dev';
+}
+
+function detectDirectMintCapability() {
+  const hasWallet = typeof window !== 'undefined'
+    && typeof window.nintondo !== 'undefined'
+    && typeof window.nintondo.signPsbt === 'function';
+  const inIframe = typeof window !== 'undefined' && window.parent !== window;
+  return {
+    hasWallet,
+    inIframe,
+    canDirectMint: hasWallet,  // bridge proxies window.nintondo too
+  };
+}
+
+async function fetchUtxosForMint(address, electrsBase) {
+  const r = await fetch(`${electrsBase}/address/${encodeURIComponent(address)}/utxo`);
+  if (!r.ok) throw new Error(`utxo fetch ${r.status}`);
+  const list = await r.json();
+  if (!Array.isArray(list)) throw new Error('utxo response is not an array');
+  // Each entry needs the full raw tx hex for nonWitnessUtxo.
+  const cache = new Map();
+  const out = [];
+  for (const u of list) {
+    if (!cache.has(u.txid)) {
+      const r2 = await fetch(`${electrsBase}/tx/${u.txid}/hex`);
+      if (!r2.ok) throw new Error(`tx/${u.txid}/hex ${r2.status}`);
+      cache.set(u.txid, (await r2.text()).trim());
     }
-    log(
-      'Mint here: v1.5 pipeline not yet wired on this tab; use Copy JSON + open companion meanwhile',
-      'warn',
+    out.push({
+      txid: u.txid,
+      vout: u.vout,
+      value: Number(u.value),
+      hex: cache.get(u.txid),
+    });
+  }
+  return out;
+}
+
+async function broadcastTxHex(electrsBase, hex) {
+  const r = await fetch(`${electrsBase}/tx`, {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain' },
+    body: hex,
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`broadcast ${r.status}: ${text.slice(0, 200)}`);
+  }
+  return (await r.text()).trim();
+}
+
+async function pollInscriptionRegistered(indexerBase, kind, inscriptionId, opts = {}) {
+  const path = kind === 'mint' ? '/api/pokemon/' : '/api/captures/';
+  const maxAttempts = opts.maxAttempts ?? 30;     // ~3 min at 6 s
+  const delayMs = opts.delayMs ?? 6000;
+  for (let i = 0; i < maxAttempts; i += 1) {
+    const r = await fetch(`${indexerBase}${path}${inscriptionId}`).catch(() => null);
+    if (r && r.ok) return await r.json().catch(() => ({}));
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return null;
+}
+
+let inscriberModulePromise = null;
+async function loadInscriberModule() {
+  if (!inscriberModulePromise) {
+    if (!window.PokeBellsBoot?.resolveModuleUrl) {
+      throw new Error('PokeBellsBoot.resolveModuleUrl is not available — boot.js v1.5 required');
+    }
+    const url = window.PokeBellsBoot.resolveModuleUrl('pokebells_inscriber');
+    inscriberModulePromise = import(/* @vite-ignore */ url);
+  }
+  return inscriberModulePromise;
+}
+
+async function inscribePayloadOnChain({
+  inscriber,
+  network,
+  bodyBytes,
+  mime,
+  signPsbtViaWallet,
+  walletAddress,
+  publicKeyHex,
+  electrsBase,
+}) {
+  const net = inscriber.networkForKey(network);
+  const utxos = await fetchUtxosForMint(walletAddress, electrsBase);
+  if (utxos.length === 0) throw new Error('wallet has no UTXOs on this network');
+
+  const getUtxos = async (requiredAmount) => {
+    utxos.sort((a, b) => b.value - a.value);
+    const picked = [];
+    let total = 0;
+    for (const u of utxos) {
+      picked.push(u);
+      total += u.value;
+      if (total >= requiredAmount + 5000) break;
+    }
+    if (total < requiredAmount) {
+      throw new Error(`insufficient: have ${total}, need ${requiredAmount}`);
+    }
+    return picked;
+  };
+
+  const result = await inscriber.inscribe({
+    toAddress: walletAddress,
+    fromAddress: walletAddress,
+    contentType: mime,
+    data: Buffer.from(bodyBytes),
+    feeRate: 150,
+    publicKey: Buffer.from(publicKeyHex.match(/.{2}/g).map((b) => parseInt(b, 16))),
+    signPsbt: signPsbtViaWallet,
+    getUtxos,
+    network: net,
+  });
+  return result;  // { fundTxHex, revealTxHex, inscriptionId }
+}
+
+function setMintStatusUi(text, tone) {
+  const el = dom.captureHandoffModal.mintStatus;
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = text ?? '';
+  el.className = tone === 'err' ? 'subline bad'
+    : tone === 'ok' ? 'subline ok'
+    : tone === 'warn' ? 'subline warn'
+    : 'subline muted';
+}
+
+async function runDirectMintFlow(attestation) {
+  const indexerBase = indexerBaseFor();
+  const cap = detectDirectMintCapability();
+  if (!cap.canDirectMint) {
+    throw new Error('window.nintondo.signPsbt not available — install the wallet or use the manual fallback');
+  }
+
+  let row = await getPendingCapture(attestation);
+  if (!row) throw new Error(`pending capture ${attestation} not found`);
+
+  const electrsBase = electrsBaseFor(row.network);
+  const signPsbt = (psbtBase64) =>
+    window.nintondo.signPsbt(psbtBase64, { autoFinalized: true });
+
+  setMintStatusUi('Loading inscriber bundle…');
+  const inscriber = await loadInscriberModule();
+
+  // Wallet handshake
+  const connectResult = await window.nintondo.connect(
+    row.network === 'bells-mainnet' ? 'bellsMainnet' : 'bellsTestnet',
+  );
+  const walletAddress = typeof connectResult === 'string'
+    ? connectResult
+    : (connectResult?.address ?? await window.nintondo.getAccount());
+  if (!walletAddress) throw new Error('wallet returned no address');
+  if (walletAddress !== row.signed_in_wallet) {
+    throw new Error(
+      `connected wallet ${walletAddress} does not match capture's signed_in_wallet ${row.signed_in_wallet}`,
     );
+  }
+  const publicKeyHex = await window.nintondo.getPublicKey();
+
+  // ---- Step 1: capture_commit ----
+  if (row.status === 'pending_commit') {
+    setMintStatusUi('Inscribing capture_commit (2 wallet popups: fund + reveal)…');
+    log(`direct-mint: inscribing commit for ${attestation.slice(0, 12)}…`, 'capture');
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(row.commit_record));
+    let result;
+    try {
+      result = await inscribePayloadOnChain({
+        inscriber, network: row.network, bodyBytes, mime: 'application/json',
+        signPsbtViaWallet: signPsbt, walletAddress, publicKeyHex, electrsBase,
+      });
+    } catch (e) {
+      // Wallet rejected popup or signing errored — no tx left the wallet.
+      // Use patch (same status) instead of transition (which would
+      // assert pending_commit → pending_commit illegal).
+      await patchPendingCapture(attestation, {
+        last_error: `commit build/sign failed: ${e.message}`,
+        retry_count: (row.retry_count ?? 0) + 1,
+      });
+      throw e;
+    }
+    // Broadcast progressively: persist EACH txid before the next
+    // attempt. If the reveal broadcast fails, the row knows fund_txid
+    // is in flight + the strengthened state-machine invariant refuses
+    // a re-broadcast that would double-spend the fund tx.
+    setMintStatusUi('Broadcasting commit fund tx…');
+    let fundTxid;
+    try {
+      fundTxid = await broadcastTxHex(electrsBase, result.fundTxHex);
+    } catch (e) {
+      // Fund broadcast failed before any tx left the wallet — safe to
+      // retry from scratch. Stay in pending_commit, no artifact to
+      // worry about.
+      await patchPendingCapture(attestation, {
+        last_error: `commit fund broadcast failed: ${e.message}`,
+        retry_count: (row.retry_count ?? 0) + 1,
+      });
+      throw e;
+    }
+    // Persist fund_txid IMMEDIATELY so tab refresh / process kill
+    // doesn't lose track of the in-flight tx.
+    row = await patchPendingCapture(attestation, {
+      commit_fund_txid: fundTxid,
+      last_error: null,
+    });
+
+    await new Promise((r) => setTimeout(r, 1500));
+
+    setMintStatusUi('Broadcasting commit reveal tx…');
+    let revealTxid;
+    try {
+      revealTxid = await broadcastTxHex(electrsBase, result.revealTxHex);
+    } catch (e) {
+      // Reveal broadcast failed but fund is on-chain. Row keeps
+      // commit_fund_txid + status=pending_commit. Strengthened
+      // invariant prevents the next runDirectMintFlow attempt from
+      // re-inscribing — user must Cancel + accept fund as wasted, or
+      // (future commit) use a "rebroadcast reveal only" recovery.
+      await patchPendingCapture(attestation, {
+        last_error: `commit reveal broadcast failed (fund_txid ${fundTxid} stranded): ${e.message}`,
+        retry_count: (row.retry_count ?? 0) + 1,
+      });
+      throw e;
+    }
+
+    row = await transitionPendingCapture(attestation, 'commit_broadcast', {
+      commit_inscription_id: result.inscriptionId,
+      commit_reveal_txid: revealTxid,
+      last_error: null,
+    });
+    log(`direct-mint: commit broadcast ${result.inscriptionId}`, 'ok');
+  }
+
+  // ---- Step 2: register commit (best-effort) + advance state ----
+  // Indexer registration is decoupled from on-chain truth. The commit
+  // inscription_id is deterministic from the reveal txid the wallet
+  // signed; we can advance the local state machine immediately even if
+  // the indexer hasn't seen it yet (e.g. mempool indexing lag, our
+  // worker temporarily offline). Failed registrations get queued in
+  // pending_registrations for retry.
+  if (row.status === 'commit_broadcast') {
+    setMintStatusUi('Registering commit with indexer (best-effort)…');
+    // Try a few quick attempts before giving up — covers the common
+    // "indexer just hasn't seen the tx yet" race without forcing the
+    // user to wait full confirmation time.
+    let registered = false;
+    for (let i = 0; i < 6; i += 1) {
+      registered = await notifyIndexerOfInscription({
+        attestation,
+        kind: 'commit',
+        inscriptionId: row.commit_inscription_id,
+        network: row.network,
+      });
+      if (registered) break;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    if (!registered) {
+      log(`direct-mint: indexer registration queued for commit (will retry later)`, 'warn');
+    }
+    row = await transitionPendingCapture(attestation, 'commit_confirmed', { last_error: null });
+    log(`direct-mint: commit advanced ${row.commit_inscription_id}`, 'ok');
+  }
+
+  // ---- Step 3: build mint body, transition to pending_mint ----
+  if (row.status === 'commit_confirmed') {
+    setMintStatusUi('Building mint inscription body…');
+    row = await transitionPendingCapture(attestation, 'pending_mint', { last_error: null });
+  }
+
+  // ---- Step 4: inscribe mint ----
+  if (row.status === 'pending_mint') {
+    const mintRecord = buildPokemonMintRecord({
+      commitRecord: row.commit_record,
+      commitInscriptionId: row.commit_inscription_id,
+      privateReveal: row.private_reveal,
+      speciesResolver: (id) => getSpeciesByInternalId(state.speciesCatalog, id),
+      resolveSpriteImage: state.spritePack.resolver,
+    });
+    setMintStatusUi('Inscribing mint (2 wallet popups: fund + reveal)…');
+    log(`direct-mint: inscribing mint for ${attestation.slice(0, 12)}…`, 'capture');
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(mintRecord));
+    let result;
+    try {
+      result = await inscribePayloadOnChain({
+        inscriber, network: row.network, bodyBytes, mime: 'application/json',
+        signPsbtViaWallet: signPsbt, walletAddress, publicKeyHex, electrsBase,
+      });
+    } catch (e) {
+      await patchPendingCapture(attestation, {
+        last_error: `mint build/sign failed: ${e.message}`,
+        retry_count: (row.retry_count ?? 0) + 1,
+      });
+      throw e;
+    }
+    // Same progressive-persist pattern as commit broadcast.
+    setMintStatusUi('Broadcasting mint fund tx…');
+    let mintFundTxid;
+    try {
+      mintFundTxid = await broadcastTxHex(electrsBase, result.fundTxHex);
+    } catch (e) {
+      await patchPendingCapture(attestation, {
+        last_error: `mint fund broadcast failed: ${e.message}`,
+        retry_count: (row.retry_count ?? 0) + 1,
+      });
+      throw e;
+    }
+    row = await patchPendingCapture(attestation, {
+      mint_fund_txid: mintFundTxid,
+      last_error: null,
+    });
+
+    await new Promise((r) => setTimeout(r, 1500));
+
+    setMintStatusUi('Broadcasting mint reveal tx…');
+    let mintRevealTxid;
+    try {
+      mintRevealTxid = await broadcastTxHex(electrsBase, result.revealTxHex);
+    } catch (e) {
+      await patchPendingCapture(attestation, {
+        last_error: `mint reveal broadcast failed (fund_txid ${mintFundTxid} stranded): ${e.message}`,
+        retry_count: (row.retry_count ?? 0) + 1,
+      });
+      throw e;
+    }
+
+    row = await transitionPendingCapture(attestation, 'mint_broadcast', {
+      mint_inscription_id: result.inscriptionId,
+      mint_reveal_txid: mintRevealTxid,
+      last_error: null,
+    });
+    log(`direct-mint: mint broadcast ${result.inscriptionId}`, 'ok');
+  }
+
+  // ---- Step 5: register mint (best-effort) + advance state ----
+  if (row.status === 'mint_broadcast') {
+    setMintStatusUi('Registering mint with indexer (best-effort)…');
+    let registered = false;
+    for (let i = 0; i < 6; i += 1) {
+      registered = await notifyIndexerOfInscription({
+        attestation,
+        kind: 'mint',
+        inscriptionId: row.mint_inscription_id,
+        network: row.network,
+      });
+      if (registered) break;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    row = await transitionPendingCapture(attestation, 'mint_confirmed', { last_error: null });
+    if (registered) {
+      setMintStatusUi(
+        `Minted ✓ ${row.preview_species_name ?? '?'} Lv.${row.preview_level ?? '?'}. `
+        + `Inscription: ${row.mint_inscription_id.slice(0, 16)}…`,
+        'ok',
+      );
+      log(`direct-mint DONE ${row.mint_inscription_id}`, 'ok');
+    } else {
+      setMintStatusUi(
+        `Mint inscribed on-chain ✓ but indexer registration queued (will retry later). `
+        + `Inscription: ${row.mint_inscription_id.slice(0, 16)}…`,
+        'warn',
+      );
+      log(`direct-mint inscribed; indexer registration queued ${row.mint_inscription_id}`, 'warn');
+    }
+    return row;
+  }
+
+  return row;
+}
+
+// Boot-time + manual "Re-notify indexer" retry for queued
+// pending_registrations. Best-effort: never throws, just walks each
+// queued kind and POSTs. The pending_registrations array shrinks as
+// notifications succeed; failures stay in the queue for next retry.
+async function drainPendingIndexerRegistrations() {
+  let rows;
+  try { rows = await listPendingCaptures(); }
+  catch { return; }
+  for (const row of rows) {
+    const queue = Array.isArray(row.pending_registrations) ? row.pending_registrations : [];
+    if (queue.length === 0) continue;
+    for (const kind of queue) {
+      const inscriptionId = kind === 'mint' ? row.mint_inscription_id : row.commit_inscription_id;
+      if (!inscriptionId) continue;  // can't notify without an id
+      await notifyIndexerOfInscription({
+        attestation: row.attestation,
+        kind,
+        inscriptionId,
+        network: row.network,
+      });
+    }
+  }
+}
+
+if (dom.captureHandoffModal.mintDirect) {
+  // Visibility of the button is controlled by showCaptureHandoff() which
+  // calls detectDirectMintCapability() before opening the modal. The
+  // handler runs the full state-machine pipeline.
+  dom.captureHandoffModal.mintDirect.addEventListener('click', async () => {
+    const view = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
+    if (!view?.attestation) {
+      setMintStatusUi('No pending capture in this modal — open one from the Pending mints panel.', 'err');
+      return;
+    }
+    dom.captureHandoffModal.mintDirect.disabled = true;
+    dom.captureHandoffModal.open.disabled = true;
+    try {
+      await runDirectMintFlow(view.attestation);
+    } catch (error) {
+      setMintStatusUi(`Direct mint failed: ${error.message}`, 'err');
+      log(`direct-mint failed: ${error.stack ?? error.message ?? error}`, 'bad');
+    } finally {
+      dom.captureHandoffModal.mintDirect.disabled = false;
+      dom.captureHandoffModal.open.disabled = false;
+    }
   });
 }
 
@@ -3548,21 +4235,352 @@ dom.captureHandoffModal.resume.addEventListener('click', () => {
   closeCaptureHandoff();
 });
 
-dom.captureHandoffModal.cancel.addEventListener('click', () => {
-  // Option A (strict): cancel = release the Pokemon in-game and discard the
-  // capture JSON. A native confirm() guards against mis-clicks. Starters
-  // reach this handler with mandatory=true and the button is hidden above,
-  // so this path is only ever reached for real captures.
-  const confirmed = window.confirm(
-    'Release this Pokemon?\n\n'
-    + 'It will be removed from your party immediately and cannot be minted '
-    + 'later. Choose OK to release, Cancel to keep it (you can still mint '
-    + 'it from the Capture JSON panel).',
-  );
+dom.captureHandoffModal.cancel.addEventListener('click', async () => {
+  // Universal cancel rule (SHELL-V1.5-PIPELINE.md): every cancel
+  // transition releases the Pokémon in-game AND marks the pending row
+  // as `cancelled`. Forbidden once mint_broadcast is reached (the
+  // state machine throws and we surface the error). Starter captures
+  // reach this handler with mandatory=true and the button is hidden in
+  // renderCaptureHandoffModal, so this path only fires for real
+  // captures the user can release.
+  const view = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
+  const attestation = view?.attestation ?? null;
+
+  // Look up the row to tailor the confirm() message — once a commit is
+  // on-chain the user needs to know it stays there forever.
+  let pendingRow = null;
+  if (attestation) {
+    try { pendingRow = await getPendingCapture(attestation); }
+    catch { /* fall through with null row */ }
+  }
+  const stage = pendingRow?.status ?? 'pending_commit';
+  let promptText;
+  switch (stage) {
+    case 'pending_commit':
+      promptText = 'Release this Pokemon?\n\n'
+        + 'Nothing has been inscribed yet. The capture will be discarded '
+        + 'and the Pokemon removed from your party. Continue?';
+      break;
+    case 'commit_broadcast':
+    case 'commit_confirmed':
+    case 'pending_mint':
+      promptText = 'Release this Pokemon?\n\n'
+        + 'A capture_commit is already on-chain (irreversible at the tx '
+        + 'level). Cancelling here means: no Pokemon NFT will follow, the '
+        + 'commit becomes a public "I caught something hidden" with no '
+        + 'payoff, and the Pokemon will be removed from your party. Continue?';
+      break;
+    case 'mint_broadcast':
+    case 'mint_confirmed':
+      window.alert(
+        `Mint already on-chain (status ${stage}). Cancel is no longer `
+        + 'possible — the Pokemon will become canonical once confirmations land.',
+      );
+      return;
+    default:
+      promptText = 'Release this Pokemon?';
+  }
+
+  const confirmed = window.confirm(promptText);
   if (!confirmed) return;
+
+  if (attestation) {
+    try { await cancelPendingCapture(attestation); }
+    catch (error) {
+      log(`cancel rejected by state machine: ${error.message}`, 'bad');
+      window.alert(`Cancel refused: ${error.message}`);
+      return;
+    }
+  }
   releasePokemonInGame(state.ui.captureHandoff.slotIndex);
   closeCaptureHandoff({ clearPayload: true });
 });
+
+// ============================================================================
+// Manual fallback handlers (SHELL-V1.5-PIPELINE.md Step 4)
+// ============================================================================
+// Always-visible <details> in the capture handoff modal. Lets a user
+// without window.nintondo (or who prefers full manual control) walk
+// the v1.5 protocol via Nintondo's web Inscriber: copy commit JSON,
+// paste returned id, copy mint JSON (built locally — same canonical
+// builder the direct path uses), paste returned id, done.
+//
+// Per GPT amendments:
+//   - Indexer registration is best-effort and decoupled. The local
+//     state advances as soon as the user pastes a valid id; failed
+//     POSTs queue into pending_registrations.
+//   - Mint body is built locally from commit_record + commit_inscription_id
+//     + privateReveal — never from a user-pasted JSON (which would let
+//     copy-paste errors silently produce inconsistent mints).
+//   - State transitions match the cancel matrix and never re-broadcast.
+
+const INSCRIPTION_ID_RE = /^[0-9a-f]{64}i\d+$/i;
+
+async function resetManualFallbackPanel(attestation) {
+  if (!dom.captureHandoffModal.manualSection) return;
+  if (dom.captureHandoffModal.manualCommitStatus) {
+    dom.captureHandoffModal.manualCommitStatus.textContent = '';
+    dom.captureHandoffModal.manualCommitStatus.className = 'subline muted';
+  }
+  if (dom.captureHandoffModal.manualMintStatus) {
+    dom.captureHandoffModal.manualMintStatus.textContent = '';
+    dom.captureHandoffModal.manualMintStatus.className = 'subline muted';
+  }
+  if (dom.captureHandoffModal.manualCommitId) dom.captureHandoffModal.manualCommitId.value = '';
+  if (dom.captureHandoffModal.manualMintId) dom.captureHandoffModal.manualMintId.value = '';
+  enableManualStep2(false);
+  if (!attestation) return;
+  const row = await getPendingCapture(attestation);
+  if (!row) return;
+  if (row.commit_inscription_id && dom.captureHandoffModal.manualCommitId) {
+    dom.captureHandoffModal.manualCommitId.value = row.commit_inscription_id;
+    setManualCommitStatus(`Resumed: commit_inscription_id ${row.commit_inscription_id.slice(0, 16)}… already set.`, 'ok');
+    enableManualStep2(true);
+  }
+  if (row.mint_inscription_id && dom.captureHandoffModal.manualMintId) {
+    dom.captureHandoffModal.manualMintId.value = row.mint_inscription_id;
+    setManualMintStatus(`Resumed: mint_inscription_id ${row.mint_inscription_id.slice(0, 16)}… already set.`, 'ok');
+  }
+}
+
+function setManualCommitStatus(text, tone) {
+  const el = dom.captureHandoffModal.manualCommitStatus;
+  if (!el) return;
+  el.textContent = text ?? '';
+  el.className = tone === 'err' ? 'subline bad'
+    : tone === 'ok' ? 'subline ok'
+    : tone === 'warn' ? 'subline warn'
+    : 'subline muted';
+}
+function setManualMintStatus(text, tone) {
+  const el = dom.captureHandoffModal.manualMintStatus;
+  if (!el) return;
+  el.textContent = text ?? '';
+  el.className = tone === 'err' ? 'subline bad'
+    : tone === 'ok' ? 'subline ok'
+    : tone === 'warn' ? 'subline warn'
+    : 'subline muted';
+}
+
+function enableManualStep2(enabled) {
+  const wrap = dom.captureHandoffModal.manualStep2;
+  if (wrap) wrap.style.opacity = enabled ? '1' : '0.45';
+  if (dom.captureHandoffModal.manualCopyMint) {
+    dom.captureHandoffModal.manualCopyMint.disabled = !enabled;
+  }
+  if (dom.captureHandoffModal.manualMintId) {
+    dom.captureHandoffModal.manualMintId.disabled = !enabled;
+  }
+}
+
+async function copyToClipboard(text) {
+  if (!navigator.clipboard?.writeText) {
+    throw new Error('Clipboard API unavailable; copy the field manually.');
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+if (dom.captureHandoffModal.manualCopyCommit) {
+  dom.captureHandoffModal.manualCopyCommit.addEventListener('click', async () => {
+    const view = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
+    if (!view?.attestation) {
+      setManualCommitStatus('No pending capture in this modal.', 'err');
+      return;
+    }
+    const row = await getPendingCapture(view.attestation);
+    if (!row) {
+      setManualCommitStatus('Pending capture not found in IDB.', 'err');
+      return;
+    }
+    try {
+      await copyToClipboard(JSON.stringify(row.commit_record, null, 2));
+      setManualCommitStatus(
+        'Commit JSON copied. Open the Inscriber, inscribe as a .txt or .json file, and paste the returned id below.',
+        'ok',
+      );
+    } catch (e) {
+      setManualCommitStatus(`Clipboard failed: ${e.message}`, 'err');
+    }
+  });
+}
+
+if (dom.captureHandoffModal.manualCommitId) {
+  // Fire on input + change so paste-and-tab works as well as paste-and-blur.
+  const handleCommitIdInput = async () => {
+    const input = dom.captureHandoffModal.manualCommitId;
+    const id = input.value.trim().toLowerCase();
+    if (!INSCRIPTION_ID_RE.test(id)) {
+      setManualCommitStatus('Format expected: 64 hex chars + iN (e.g. ab12...cdi0)', 'muted');
+      return;
+    }
+    const view = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
+    if (!view?.attestation) {
+      setManualCommitStatus('No pending capture context.', 'err');
+      return;
+    }
+    let row = await getPendingCapture(view.attestation);
+    if (!row) {
+      setManualCommitStatus('Pending capture not found.', 'err');
+      return;
+    }
+    if (row.commit_inscription_id && row.commit_inscription_id !== id) {
+      setManualCommitStatus(
+        `Refusing to overwrite commit_inscription_id ${row.commit_inscription_id.slice(0, 16)}… `
+        + 'with a different value (state-machine invariant 3).',
+        'err',
+      );
+      return;
+    }
+    if (row.status === 'pending_commit') {
+      try {
+        row = await transitionPendingCapture(view.attestation, 'commit_broadcast', {
+          commit_inscription_id: id,
+          last_error: null,
+        });
+        row = await transitionPendingCapture(view.attestation, 'commit_confirmed', {
+          last_error: null,
+        });
+      } catch (e) {
+        setManualCommitStatus(`State transition failed: ${e.message}`, 'err');
+        return;
+      }
+    } else if (row.status === 'commit_broadcast') {
+      try {
+        row = await transitionPendingCapture(view.attestation, 'commit_confirmed', {
+          last_error: null,
+        });
+      } catch (e) {
+        setManualCommitStatus(`State transition failed: ${e.message}`, 'err');
+        return;
+      }
+    }
+    // Best-effort indexer notify; failure queues into pending_registrations.
+    setManualCommitStatus('Saved locally. Notifying indexer (best-effort)…', 'ok');
+    const ok = await notifyIndexerOfInscription({
+      attestation: view.attestation,
+      kind: 'commit',
+      inscriptionId: id,
+      network: row.network,
+    });
+    setManualCommitStatus(
+      ok
+        ? `Commit registered ✓ (${id.slice(0, 16)}…). Now build + inscribe the mint in step 2.`
+        : `Saved locally; indexer registration queued (will retry later).`,
+      ok ? 'ok' : 'warn',
+    );
+    enableManualStep2(true);
+  };
+  dom.captureHandoffModal.manualCommitId.addEventListener('input', handleCommitIdInput);
+  dom.captureHandoffModal.manualCommitId.addEventListener('change', handleCommitIdInput);
+}
+
+if (dom.captureHandoffModal.manualCopyMint) {
+  dom.captureHandoffModal.manualCopyMint.addEventListener('click', async () => {
+    const view = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
+    if (!view?.attestation) {
+      setManualMintStatus('No pending capture context.', 'err');
+      return;
+    }
+    let row = await getPendingCapture(view.attestation);
+    if (!row) {
+      setManualMintStatus('Pending capture not found.', 'err');
+      return;
+    }
+    if (!row.commit_inscription_id) {
+      setManualMintStatus('Commit inscription id missing — complete step 1 first.', 'err');
+      return;
+    }
+    // Build mint locally — never trust a user-pasted mint JSON.
+    let mintRecord;
+    try {
+      mintRecord = buildPokemonMintRecord({
+        commitRecord: row.commit_record,
+        commitInscriptionId: row.commit_inscription_id,
+        privateReveal: row.private_reveal,
+        speciesResolver: (id) => getSpeciesByInternalId(state.speciesCatalog, id),
+        resolveSpriteImage: state.spritePack.resolver,
+      });
+    } catch (e) {
+      setManualMintStatus(`Mint build failed: ${e.message}`, 'err');
+      return;
+    }
+    // Walk to pending_mint if not already there.
+    if (row.status === 'commit_confirmed') {
+      try {
+        row = await transitionPendingCapture(view.attestation, 'pending_mint', { last_error: null });
+      } catch (e) {
+        setManualMintStatus(`State transition failed: ${e.message}`, 'err');
+        return;
+      }
+    }
+    try {
+      await copyToClipboard(JSON.stringify(mintRecord, null, 2));
+      setManualMintStatus(
+        'Mint JSON copied. Open the Inscriber, inscribe, and paste the returned id below.',
+        'ok',
+      );
+    } catch (e) {
+      setManualMintStatus(`Clipboard failed: ${e.message}`, 'err');
+    }
+  });
+}
+
+if (dom.captureHandoffModal.manualMintId) {
+  const handleMintIdInput = async () => {
+    const input = dom.captureHandoffModal.manualMintId;
+    const id = input.value.trim().toLowerCase();
+    if (!INSCRIPTION_ID_RE.test(id)) {
+      setManualMintStatus('Format expected: 64 hex chars + iN', 'muted');
+      return;
+    }
+    const view = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
+    if (!view?.attestation) {
+      setManualMintStatus('No pending capture context.', 'err');
+      return;
+    }
+    let row = await getPendingCapture(view.attestation);
+    if (!row) {
+      setManualMintStatus('Pending capture not found.', 'err');
+      return;
+    }
+    if (row.mint_inscription_id && row.mint_inscription_id !== id) {
+      setManualMintStatus(
+        `Refusing to overwrite mint_inscription_id ${row.mint_inscription_id.slice(0, 16)}…`,
+        'err',
+      );
+      return;
+    }
+    if (row.status === 'pending_mint') {
+      try {
+        row = await transitionPendingCapture(view.attestation, 'mint_broadcast', {
+          mint_inscription_id: id,
+          last_error: null,
+        });
+        row = await transitionPendingCapture(view.attestation, 'mint_confirmed', {
+          last_error: null,
+        });
+      } catch (e) {
+        setManualMintStatus(`State transition failed: ${e.message}`, 'err');
+        return;
+      }
+    }
+    setManualMintStatus('Saved locally. Notifying indexer (best-effort)…', 'ok');
+    const ok = await notifyIndexerOfInscription({
+      attestation: view.attestation,
+      kind: 'mint',
+      inscriptionId: id,
+      network: row.network,
+    });
+    setManualMintStatus(
+      ok
+        ? `Pokémon minted ✓ (${id.slice(0, 16)}…). Visible in your Trainer panel after the indexer scans.`
+        : `Saved locally; indexer registration queued (will retry later).`,
+      ok ? 'ok' : 'warn',
+    );
+  };
+  dom.captureHandoffModal.manualMintId.addEventListener('input', handleMintIdInput);
+  dom.captureHandoffModal.manualMintId.addEventListener('change', handleMintIdInput);
+}
 
 // ---- Save handoff wiring ----
 
@@ -3806,6 +4824,15 @@ renderPokeballStatus(getPokeballCooldownStatus(state.pokeball.tipHeight));
 renderWalletProviderLog();
 renderWalletAdapterOptions();
 bindPadButtons();
+
+// v1.5: drain any indexer registrations that failed in a previous
+// session. Best-effort + non-blocking — we never await this in the
+// boot path so a slow/down indexer doesn't stall the game UI.
+setTimeout(() => {
+  drainPendingIndexerRegistrations().catch((error) => {
+    log(`drainPendingIndexerRegistrations failed: ${error.message}`, 'warn');
+  });
+}, 5000);
 bindKeyboard();
 
 // Steal focus from any text input when the user clicks the game area so the

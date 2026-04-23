@@ -6,6 +6,7 @@
   "capture_core_inscription_id": "REPLACE_ME_capture_core_es_module_i0",
   "gen2_species_inscription_id": "REPLACE_ME_gen2_species_es_module_i0",
   "gen2_pc_storage_inscription_id": "REPLACE_ME_gen2_pc_storage_es_module_i0",
+  "pending_captures_inscription_id": "REPLACE_ME_pending_captures_es_module_i0",
   "wallet_adapter_inscription_id": "REPLACE_ME_wallet_adapter_es_module_i0",
   "signin_verify_inscription_id": "REPLACE_ME_signin_verify_es_module_i0",
   "pbrp_session_key_inscription_id": "REPLACE_ME_pbrp_session_key_es_module_i0",

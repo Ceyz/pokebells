@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-04-23T04:05:18.762Z",
+  "generatedAt": "2026-04-23T05:09:27.926Z",
   "network": "bells-testnet",
-  "assetCount": 526,
-  "tier1KnownBytes": 3271485,
+  "assetCount": 527,
+  "tier1KnownBytes": 3318517,
   "notes": [
     "Inscribe in tier order (1 → 4). Inside tier 1 the order doesn't matter.",
     "Nintondo Inscriber rejects .js/.mjs uploads → inscribe ES modules as .txt.",
@@ -5686,6 +5686,17 @@
     },
     {
       "role": "es-module",
+      "key": "pending_captures",
+      "inscribeAs": "pending_captures.txt",
+      "contentType": "text/plain",
+      "file": "game/pending-captures.mjs",
+      "bytes": 6996,
+      "sha256": "13241ec13aeef7a8a6f1034fceb4d787c412551393b2de085db00e6c4c59ed57",
+      "dependsOn": [],
+      "placeholder": "PENDING_CAPTURES_INSCRIPTION_ID"
+    },
+    {
+      "role": "es-module",
       "key": "wallet_adapter",
       "inscribeAs": "wallet_adapter.txt",
       "contentType": "text/plain",
@@ -5734,8 +5745,8 @@
       "inscribeAs": "shell.txt",
       "contentType": "text/plain",
       "file": "game/shell.js",
-      "bytes": 131787,
-      "sha256": "e69617f71ab09d9c8abd3952a79868473d89e2cbc24d0bb32e52223f0f24c4f6",
+      "bytes": 171823,
+      "sha256": "fd8c39c4dc4eaa9de1dc6d11ac0df75461dd65c7431c22fdb6ede1cf18f7dc62",
       "dependsOn": [],
       "placeholder": "SHELL_INSCRIPTION_ID"
     },
