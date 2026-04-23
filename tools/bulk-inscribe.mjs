@@ -567,9 +567,14 @@ async function main() {
   // descendant-size limit (101 KB default).
   let lastRevealTxid = null;
   // Supported tier-2 manifests. For other tier-2 roles (sprite-pack-manifest,
-  // collection-metadata, root-html) we defer — they need role-specific fill
-  // logic or a separate template that doesn't exist yet.
-  const AUTO_FILL_ROLES = new Set(["rom-manifest", "main-manifest"]);
+  // root-html) we defer — they need role-specific fill logic or bigger
+  // structural changes.
+  //
+  //   rom-manifest: fills ROM_CHUNK_* + BINJGB_* placeholders
+  //   main-manifest: fills module + chunks + rom + collection placeholders
+  //   collection-metadata: template is static (no placeholders), inscribes
+  //     as-is — included here so it's not incorrectly deferred.
+  const AUTO_FILL_ROLES = new Set(["rom-manifest", "main-manifest", "collection-metadata"]);
 
   let tier2Deferred = 0;
   for (const asset of remaining) {

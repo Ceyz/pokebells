@@ -1,0 +1,24 @@
+{
+  "p": "pokebells-collection",
+  "v": 1,
+  "name": "PokeBells",
+  "slug": "pokebells",
+  "description": "Pokemon Crystal on-chain captures — Bells ordinals. Each catch becomes two inscriptions: an opaque capture_commit plus a canonical mint NFT with the sprite rendered by the marketplace via recursive reference.",
+  "website": "https://bellforge.app/pokebells/",
+  "schema": {
+    "capture_commit": "p:pokebells + op:capture_commit — opaque receipt, returns with op:mint before the NFT is canonical",
+    "mint": "p:pokebells + op:mint — canonical NFT with nft_metadata.image referencing a sprite inscription, IVs/EVs/shiny revealed",
+    "evolve": "p:pokebells + op:evolve — appended to the original mint inscription_id, species + stats update"
+  },
+  "networks": ["bells-mainnet", "bells-testnet"],
+  "indexer_urls": [
+    "https://pokebells-indexer.ceyzcrypto.workers.dev"
+  ],
+  "companion_urls": [
+    "https://bellforge.app/pokebells/"
+  ],
+  "bridge_urls": [
+    "https://bellforge.app/pokebells/play-bridge.html"
+  ],
+  "license": "MIT"
+}
