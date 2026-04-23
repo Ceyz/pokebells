@@ -207,11 +207,28 @@ async function waitForConfirmation(electrs, txid, timeoutMs = 600_000) {
   throw new Error(`confirmation timeout for ${txid} after ${timeoutMs}ms`);
 }
 
-async function broadcastPairWithRetry(electrs, commitHex, revealHex, waitOnTxid) {
+// Swallow "already on chain / already in mempool" errors — they happen
+// when a tx we thought failed was actually accepted (e.g. the wait loop
+// below races with a block confirmation). Returns "already" so the caller
+// knows it was a no-op; throws for any other failure.
+async function safeBroadcast(electrs, hex) {
+  try {
+    await electrs.broadcast(hex);
+    return "broadcast";
+  } catch (e) {
+    const m = String(e.message);
+    if (/already in (utxo set|block|chain|mempool)|Transaction already|-27/i.test(m)) {
+      return "already";
+    }
+    throw e;
+  }
+}
+
+async function broadcastPairWithRetry(electrs, commitHex, revealHex, commitTxid, revealTxid, waitOnTxid) {
   async function attempt() {
-    const commitTxid = await electrs.broadcast(commitHex);
-    const revealTxid = await electrs.broadcast(revealHex);
-    return { commitTxid, revealTxid };
+    const c = await safeBroadcast(electrs, commitHex);
+    const r = await safeBroadcast(electrs, revealHex);
+    return { commitTxid, revealTxid, commitStatus: c, revealStatus: r };
   }
   try {
     return await attempt();
@@ -516,9 +533,13 @@ async function main() {
     if (!opts.dryRun) {
       try {
         const bc = await broadcastPairWithRetry(
-          electrs, result.commitHex, result.revealHex, lastRevealTxid,
+          electrs,
+          result.commitHex, result.revealHex,
+          result.commitTxid, result.revealTxid,
+          lastRevealTxid,
         );
-        console.log(`  broadcast ok: commit=${bc.commitTxid.slice(0, 16)}… reveal=${bc.revealTxid.slice(0, 16)}…`);
+        const tag = (s) => s === "already" ? "(already-on-chain)" : "";
+        console.log(`  broadcast ok: commit=${bc.commitTxid.slice(0, 16)}… ${tag(bc.commitStatus)} reveal=${bc.revealTxid.slice(0, 16)}… ${tag(bc.revealStatus)}`);
         lastRevealTxid = bc.revealTxid;
       } catch (e) {
         console.error(`  broadcast failed: ${e.message}`);
