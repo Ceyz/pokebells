@@ -175,12 +175,55 @@ class Electrs {
   async utxos(addr) { return this._get(`/address/${addr}/utxo`); }
   async balance(addr) { return this._get(`/address/${addr}`); }
   async txHex(txid) { return this._get(`/tx/${txid}/hex`, true); }
+  async txStatus(txid) { return this._get(`/tx/${txid}/status`); }
   async tipHeight() { return parseInt(await this._get(`/blocks/tip/height`, true), 10); }
   async broadcast(hex) {
     const r = await fetch(`${this.base}/tx`, { method: "POST", body: hex });
     const text = await r.text();
     if (!r.ok) throw new Error(`broadcast failed (${r.status}): ${text}`);
     return text.trim();
+  }
+}
+
+// Poll /tx/:txid/status until confirmed or timeout. Used to drain the
+// mempool chain when we hit Bells's descendant-size limit (101 KB by
+// default) — i.e. every ~1 block for big ROM-chunk reveals.
+async function waitForConfirmation(electrs, txid, timeoutMs = 600_000) {
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    attempts++;
+    try {
+      const s = await electrs.txStatus(txid);
+      if (s?.confirmed) return { confirmed: true, height: s.block_height, attempts };
+    } catch (e) {
+      // 404 while unconfirmed is normal on some electrs variants — keep polling.
+      if (!/404/.test(String(e.message))) throw e;
+    }
+    // Small backoff, cap at 15s
+    const delay = Math.min(5000 + attempts * 1000, 15_000);
+    await new Promise((r) => setTimeout(r, delay));
+  }
+  throw new Error(`confirmation timeout for ${txid} after ${timeoutMs}ms`);
+}
+
+async function broadcastPairWithRetry(electrs, commitHex, revealHex, waitOnTxid) {
+  async function attempt() {
+    const commitTxid = await electrs.broadcast(commitHex);
+    const revealTxid = await electrs.broadcast(revealHex);
+    return { commitTxid, revealTxid };
+  }
+  try {
+    return await attempt();
+  } catch (e) {
+    if (!/too-long-mempool-chain/i.test(String(e.message))) throw e;
+    if (!waitOnTxid) {
+      throw new Error(`mempool chain limit hit and no prior tx to wait on: ${e.message}`);
+    }
+    console.log(`  mempool chain full, waiting for ${waitOnTxid.slice(0, 16)}… to confirm…`);
+    const c = await waitForConfirmation(electrs, waitOnTxid);
+    console.log(`  confirmed at height ${c.height} after ${c.attempts} polls, retrying broadcast`);
+    return await attempt();
   }
 }
 
@@ -433,6 +476,10 @@ async function main() {
   // Run
   let utxoPool = initialUtxos.filter((u) => !progress.spentOutpoints.includes(`${u.txid}:${u.vout}`));
   let idx = 0;
+  // Track the last successfully-broadcast reveal so we can wait on it
+  // if Bells rejects the next commit for exceeding the mempool-chain
+  // descendant-size limit (101 KB default).
+  let lastRevealTxid = null;
   for (const asset of remaining) {
     idx++;
     const key = assetKey(asset);
@@ -468,9 +515,11 @@ async function main() {
 
     if (!opts.dryRun) {
       try {
-        const commitBroadcasted = await electrs.broadcast(result.commitHex);
-        const revealBroadcasted = await electrs.broadcast(result.revealHex);
-        console.log(`  broadcast ok: commit=${commitBroadcasted.slice(0, 16)}… reveal=${revealBroadcasted.slice(0, 16)}…`);
+        const bc = await broadcastPairWithRetry(
+          electrs, result.commitHex, result.revealHex, lastRevealTxid,
+        );
+        console.log(`  broadcast ok: commit=${bc.commitTxid.slice(0, 16)}… reveal=${bc.revealTxid.slice(0, 16)}…`);
+        lastRevealTxid = bc.revealTxid;
       } catch (e) {
         console.error(`  broadcast failed: ${e.message}`);
         console.error(`  state NOT saved; safe to re-run with --resume`);
