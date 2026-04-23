@@ -485,19 +485,21 @@ async function main() {
     utxoPool = utxoPool.filter((u) => !spentSet.has(`${u.txid}:${u.vout}`));
     if (result.changeUtxo) utxoPool.push(result.changeUtxo);
 
-    // Persist progress ONLY after successful broadcast (or dry-run)
-    progress.inscriptions[key] = {
-      inscription_id: result.inscriptionId,
-      commit_txid: result.commitTxid,
-      reveal_txid: result.revealTxid,
-      fees: result.fees,
-      asset_role: asset.role,
-      placeholder: asset.placeholder ?? null,
-      inscribed_at: new Date().toISOString(),
-      dry_run: opts.dryRun,
-    };
-    progress.spentOutpoints = Array.from(new Set([...progress.spentOutpoints, ...result.spentUtxos]));
-    saveProgress(opts.network, progress);
+    // Persist progress ONLY on a live run. Dry-run entries must NOT
+    // block a subsequent live run from re-inscribing the same asset.
+    if (!opts.dryRun) {
+      progress.inscriptions[key] = {
+        inscription_id: result.inscriptionId,
+        commit_txid: result.commitTxid,
+        reveal_txid: result.revealTxid,
+        fees: result.fees,
+        asset_role: asset.role,
+        placeholder: asset.placeholder ?? null,
+        inscribed_at: new Date().toISOString(),
+      };
+      progress.spentOutpoints = Array.from(new Set([...progress.spentOutpoints, ...result.spentUtxos]));
+      saveProgress(opts.network, progress);
+    }
   }
 
   console.log(`\n[done] ${idx} asset(s) processed. Progress: ${progressFilePath(opts.network)}`);
