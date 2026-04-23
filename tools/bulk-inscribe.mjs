@@ -57,6 +57,7 @@ function parseArgs(argv) {
     resume: true,
     electrsBase: null,
     confirm: false,
+    skipKeys: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -73,6 +74,7 @@ function parseArgs(argv) {
       case "--no-resume": opts.resume = false; break;
       case "--electrs": opts.electrsBase = v(); break;
       case "--yes": opts.confirm = true; break;
+      case "--skip": opts.skipKeys.push(v()); break;
       case "-h": case "--help":
         printUsage(); process.exit(0); break;
       default:
@@ -107,6 +109,10 @@ Flags:
   --no-resume            Ignore the progress file and start from scratch.
   --electrs <url>        Override electrs base (defaults to Nintondo).
   --yes                  Skip the confirmation prompt.
+  --skip <key>           Skip an asset by key or inscribeAs filename (can
+                         pass multiple times). Useful for assets that
+                         exceed the 400K WU standard-tx limit and need
+                         chunking (e.g. --skip pokebells_inscriber).
 
 Never commit your key file to git. Wipe it after the run.
 `);
@@ -471,8 +477,18 @@ async function main() {
   // Load progress
   const progress = loadProgress(opts.network, opts.resume);
   const alreadyDone = new Set(Object.keys(progress.inscriptions));
-  const remaining = checklist.assets.filter((a) => !alreadyDone.has(assetKey(a)));
-  console.log(`[plan] done: ${alreadyDone.size} / pending: ${remaining.length}`);
+  // --skip entries match on asset.key (for ES modules) or asset.inscribeAs
+  // (for anything else). Skipped assets are never fetched/signed.
+  const skipSet = new Set(opts.skipKeys);
+  function isSkipped(a) {
+    return skipSet.has(a.key ?? "") || skipSet.has(a.inscribeAs ?? "");
+  }
+  const remaining = checklist.assets.filter((a) => !alreadyDone.has(assetKey(a)) && !isSkipped(a));
+  const skippedCount = checklist.assets.filter((a) => !alreadyDone.has(assetKey(a)) && isSkipped(a)).length;
+  console.log(`[plan] done: ${alreadyDone.size} / pending: ${remaining.length}${skippedCount ? ` / skipped: ${skippedCount}` : ""}`);
+  if (skippedCount) {
+    console.log(`[plan] skipping: ${opts.skipKeys.join(", ")}`);
+  }
 
   if (opts.limit && remaining.length > opts.limit) remaining.length = opts.limit;
 
