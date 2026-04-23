@@ -4121,32 +4121,29 @@ async function runDirectMintFlow(attestation) {
     log(`direct-mint: commit broadcast ${cachedInscriptionId}`, 'ok');
   }
 
-  // ---- Step 2: register commit (best-effort) + advance state ----
-  // Indexer registration is decoupled from on-chain truth. The commit
-  // inscription_id is deterministic from the reveal txid the wallet
-  // signed; we can advance the local state machine immediately even if
-  // the indexer hasn't seen it yet (e.g. mempool indexing lag, our
-  // worker temporarily offline). Failed registrations get queued in
-  // pending_registrations for retry.
+  // ---- Step 2: register commit (best-effort, single shot) + advance ----
+  // Tries the indexer ONCE — failures queue in pending_registrations and
+  // drain on next boot or via manual "Re-notify indexer". We deliberately
+  // do NOT block the flow with retries here: that adds a 30s wait
+  // between popups 2 (commit reveal) and 3 (mint fund) which the user
+  // perceives as "it's done" + then panics when more popups appear out
+  // of nowhere. The mint inscription_id is deterministic from the
+  // reveal txid (see broadcastTxHex result), so we don't need indexer
+  // ack to proceed.
   if (row.status === 'commit_broadcast') {
-    setMintStatusUi('Registering commit with indexer (best-effort)…');
-    // Try a few quick attempts before giving up — covers the common
-    // "indexer just hasn't seen the tx yet" race without forcing the
-    // user to wait full confirmation time.
-    let registered = false;
-    for (let i = 0; i < 6; i += 1) {
-      registered = await notifyIndexerOfInscription({
-        attestation,
-        kind: 'commit',
-        inscriptionId: row.commit_inscription_id,
-        network: row.network,
-      });
-      if (registered) break;
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-    if (!registered) {
-      log(`direct-mint: indexer registration queued for commit (will retry later)`, 'warn');
-    }
+    setMintStatusUi('Registering commit with indexer (best-effort, queued on failure)…');
+    notifyIndexerOfInscription({
+      attestation,
+      kind: 'commit',
+      inscriptionId: row.commit_inscription_id,
+      network: row.network,
+    }).then((registered) => {
+      if (!registered) {
+        log(`direct-mint: indexer commit registration queued (will retry later)`, 'warn');
+      }
+    }).catch((e) => {
+      log(`direct-mint: indexer commit notify rejected: ${e.message}`, 'warn');
+    });
     row = await transitionPendingCapture(attestation, 'commit_confirmed', { last_error: null });
     log(`direct-mint: commit advanced ${row.commit_inscription_id}`, 'ok');
   }
@@ -4252,35 +4249,36 @@ async function runDirectMintFlow(attestation) {
     log(`direct-mint: mint broadcast ${cachedInscriptionId}`, 'ok');
   }
 
-  // ---- Step 5: register mint (best-effort) + advance state ----
+  // ---- Step 5: register mint (best-effort, single shot) + done ----
+  // Same single-shot semantics as Step 2 — failure queues, no blocking
+  // retry loop that would freeze the modal for 30s of user confusion.
   if (row.status === 'mint_broadcast') {
-    setMintStatusUi('Registering mint with indexer (best-effort)…');
-    let registered = false;
-    for (let i = 0; i < 6; i += 1) {
-      registered = await notifyIndexerOfInscription({
-        attestation,
-        kind: 'mint',
-        inscriptionId: row.mint_inscription_id,
-        network: row.network,
-      });
-      if (registered) break;
-      await new Promise((r) => setTimeout(r, 5000));
-    }
+    setMintStatusUi('Registering mint with indexer (best-effort, queued on failure)…');
+    const registerResult = await notifyIndexerOfInscription({
+      attestation,
+      kind: 'mint',
+      inscriptionId: row.mint_inscription_id,
+      network: row.network,
+    }).catch((e) => {
+      log(`direct-mint: indexer mint notify rejected: ${e.message}`, 'warn');
+      return false;
+    });
     row = await transitionPendingCapture(attestation, 'mint_confirmed', { last_error: null });
-    if (registered) {
+    if (registerResult === true) {
       setMintStatusUi(
-        `Minted ✓ ${row.preview_species_name ?? '?'} Lv.${row.preview_level ?? '?'}. `
+        `Minted + indexed ✓ ${row.preview_species_name ?? '?'} Lv.${row.preview_level ?? '?'}. `
         + `Inscription: ${row.mint_inscription_id.slice(0, 16)}…`,
         'ok',
       );
       log(`direct-mint DONE ${row.mint_inscription_id}`, 'ok');
     } else {
       setMintStatusUi(
-        `Mint inscribed on-chain ✓ but indexer registration queued (will retry later). `
-        + `Inscription: ${row.mint_inscription_id.slice(0, 16)}…`,
+        `Both inscriptions broadcast on-chain ✓ — indexer sync queued in background `
+        + `(will retry on next page reload or via 'Re-notify indexer'). `
+        + `Mint: ${row.mint_inscription_id.slice(0, 16)}…`,
         'warn',
       );
-      log(`direct-mint inscribed; indexer registration queued ${row.mint_inscription_id}`, 'warn');
+      log(`direct-mint broadcast OK; indexer sync queued ${row.mint_inscription_id}`, 'warn');
     }
     return row;
   }
