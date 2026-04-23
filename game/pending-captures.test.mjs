@@ -11,6 +11,8 @@ import {
   assertPendingTransition,
   makePendingCaptureRow,
   cancelAllowed,
+  detectCommitRecoveryState,
+  detectMintRecoveryState,
 } from './pending-captures.mjs';
 
 const FIXTURE_COMMIT = Object.freeze({
@@ -241,6 +243,72 @@ test('makePendingCaptureRow: defaults match spec', () => {
   assert.equal(row.last_error, null);
   assert.ok(row.created_at);
   assert.ok(row.updated_at);
+});
+
+test('makePendingCaptureRow: cached signed-tx-hex slots default to null', () => {
+  const row = makeRow();
+  assert.equal(row.commit_fund_tx_hex, null);
+  assert.equal(row.commit_reveal_tx_hex, null);
+  assert.equal(row.mint_fund_tx_hex, null);
+  assert.equal(row.mint_reveal_tx_hex, null);
+});
+
+test('detectCommitRecoveryState: fresh row → safe to sign + broadcast', () => {
+  const row = makeRow();
+  const r = detectCommitRecoveryState(row);
+  assert.equal(r.state, 'fresh');
+  assert.equal(r.canProceed, true);
+});
+
+test('detectCommitRecoveryState: partial broadcast WITH cached hexes → recovery', () => {
+  const row = makeRow({
+    commit_fund_txid: 'a'.repeat(64),
+    commit_fund_tx_hex: '01000000ff',
+    commit_reveal_tx_hex: '02000000ff',
+  });
+  const r = detectCommitRecoveryState(row);
+  assert.equal(r.state, 'recovery');
+  assert.equal(r.canProceed, true);
+});
+
+test('detectCommitRecoveryState: partial broadcast WITHOUT cached hexes → stranded', () => {
+  // This is the GPT round-5 scenario: fund tx broadcast but no signed
+  // hex cache (e.g. cache cleared, or pre-cache code shipped). Direct
+  // mint flow MUST refuse to call inscriber lib (would re-sign + double-
+  // spend).
+  const row = makeRow({
+    commit_fund_txid: 'a'.repeat(64),
+    commit_fund_tx_hex: null,
+    commit_reveal_tx_hex: null,
+  });
+  const r = detectCommitRecoveryState(row);
+  assert.equal(r.state, 'stranded');
+  assert.equal(r.canProceed, false);
+  assert.match(r.reason, /commit broadcast partial.*manual recovery required/);
+
+  // Same conclusion if only inscription_id exists with no hexes:
+  const r2 = detectCommitRecoveryState(makeRow({
+    commit_inscription_id: 'b'.repeat(64) + 'i0',
+  }));
+  assert.equal(r2.state, 'stranded');
+});
+
+test('detectMintRecoveryState: fresh / recovery / stranded buckets', () => {
+  const fresh = detectMintRecoveryState(makeRow());
+  assert.equal(fresh.state, 'fresh');
+
+  const recovery = detectMintRecoveryState(makeRow({
+    mint_fund_txid: 'a'.repeat(64),
+    mint_fund_tx_hex: 'ff',
+    mint_reveal_tx_hex: 'ff',
+  }));
+  assert.equal(recovery.state, 'recovery');
+
+  const stranded = detectMintRecoveryState(makeRow({
+    mint_fund_txid: 'a'.repeat(64),
+  }));
+  assert.equal(stranded.state, 'stranded');
+  assert.equal(stranded.canProceed, false);
 });
 
 test('cancel matrix: every state in the spec is reachable from initial path', () => {

@@ -2672,6 +2672,8 @@ const {
   assertPendingTransition,
   makePendingCaptureRow,
   cancelAllowed,
+  detectCommitRecoveryState,
+  detectMintRecoveryState,
 } = pendingCapturesTools;
 
 // Queue helpers — pure IDB updates, never throw on indexer failures.
@@ -3975,76 +3977,99 @@ async function runDirectMintFlow(attestation) {
   const publicKeyHex = await window.nintondo.getPublicKey();
 
   // ---- Step 1: capture_commit ----
+  // Recovery-aware: if a previous attempt broadcast fund OK but reveal
+  // KO (or refresh happened mid-broadcast), this branch detects the
+  // partial state at the TOP and either (a) re-broadcasts only the
+  // missing tx using cached signed hexes ("recovery"), or (b) refuses
+  // to call the inscriber lib if no hex cache exists ("stranded" —
+  // would otherwise re-sign + re-broadcast a SECOND fund tx, double-
+  // spending). The fresh-row path signs + caches BEFORE broadcasting.
   if (row.status === 'pending_commit') {
-    setMintStatusUi('Inscribing capture_commit (2 wallet popups: fund + reveal)…');
-    log(`direct-mint: inscribing commit for ${attestation.slice(0, 12)}…`, 'capture');
-    const bodyBytes = new TextEncoder().encode(JSON.stringify(row.commit_record));
-    let result;
-    try {
-      result = await inscribePayloadOnChain({
-        inscriber, network: row.network, bodyBytes, mime: 'application/json',
-        signPsbtViaWallet: signPsbt, walletAddress, publicKeyHex, electrsBase,
-      });
-    } catch (e) {
-      // Wallet rejected popup or signing errored — no tx left the wallet.
-      // Use patch (same status) instead of transition (which would
-      // assert pending_commit → pending_commit illegal).
-      await patchPendingCapture(attestation, {
-        last_error: `commit build/sign failed: ${e.message}`,
-        retry_count: (row.retry_count ?? 0) + 1,
-      });
-      throw e;
+    const recovery = detectCommitRecoveryState(row);
+    if (recovery.state === 'stranded') {
+      throw new Error(recovery.reason);
     }
-    // Broadcast progressively: persist EACH txid before the next
-    // attempt. If the reveal broadcast fails, the row knows fund_txid
-    // is in flight + the strengthened state-machine invariant refuses
-    // a re-broadcast that would double-spend the fund tx.
-    setMintStatusUi('Broadcasting commit fund tx…');
-    let fundTxid;
-    try {
-      fundTxid = await broadcastTxHex(electrsBase, result.fundTxHex);
-    } catch (e) {
-      // Fund broadcast failed before any tx left the wallet — safe to
-      // retry from scratch. Stay in pending_commit, no artifact to
-      // worry about.
-      await patchPendingCapture(attestation, {
-        last_error: `commit fund broadcast failed: ${e.message}`,
-        retry_count: (row.retry_count ?? 0) + 1,
+
+    let cachedFundHex = row.commit_fund_tx_hex;
+    let cachedRevealHex = row.commit_reveal_tx_hex;
+    let cachedInscriptionId = row.commit_inscription_id;
+
+    if (recovery.state === 'fresh') {
+      setMintStatusUi('Inscribing capture_commit (2 wallet popups: fund + reveal)…');
+      log(`direct-mint: inscribing commit for ${attestation.slice(0, 12)}…`, 'capture');
+      const bodyBytes = new TextEncoder().encode(JSON.stringify(row.commit_record));
+      let result;
+      try {
+        result = await inscribePayloadOnChain({
+          inscriber, network: row.network, bodyBytes, mime: 'application/json',
+          signPsbtViaWallet: signPsbt, walletAddress, publicKeyHex, electrsBase,
+        });
+      } catch (e) {
+        await patchPendingCapture(attestation, {
+          last_error: `commit build/sign failed: ${e.message}`,
+          retry_count: (row.retry_count ?? 0) + 1,
+        });
+        throw e;
+      }
+      // Persist signed hexes BEFORE any broadcast so a partial-broadcast
+      // failure can recover without a second wallet popup.
+      row = await patchPendingCapture(attestation, {
+        commit_fund_tx_hex: result.fundTxHex,
+        commit_reveal_tx_hex: result.revealTxHex,
+        last_error: null,
       });
-      throw e;
+      cachedFundHex = result.fundTxHex;
+      cachedRevealHex = result.revealTxHex;
+      cachedInscriptionId = result.inscriptionId;
+    } else {
+      log(`direct-mint: resuming commit from cached signed hexes (recovery)`, 'warn');
+      setMintStatusUi('Recovery: re-broadcasting whichever commit tx is missing…');
     }
-    // Persist fund_txid IMMEDIATELY so tab refresh / process kill
-    // doesn't lose track of the in-flight tx.
-    row = await patchPendingCapture(attestation, {
-      commit_fund_txid: fundTxid,
-      last_error: null,
-    });
 
-    await new Promise((r) => setTimeout(r, 1500));
-
-    setMintStatusUi('Broadcasting commit reveal tx…');
-    let revealTxid;
-    try {
-      revealTxid = await broadcastTxHex(electrsBase, result.revealTxHex);
-    } catch (e) {
-      // Reveal broadcast failed but fund is on-chain. Row keeps
-      // commit_fund_txid + status=pending_commit. Strengthened
-      // invariant prevents the next runDirectMintFlow attempt from
-      // re-inscribing — user must Cancel + accept fund as wasted, or
-      // (future commit) use a "rebroadcast reveal only" recovery.
-      await patchPendingCapture(attestation, {
-        last_error: `commit reveal broadcast failed (fund_txid ${fundTxid} stranded): ${e.message}`,
-        retry_count: (row.retry_count ?? 0) + 1,
+    // Fund broadcast (skipped if commit_fund_txid already persisted).
+    if (!row.commit_fund_txid) {
+      setMintStatusUi('Broadcasting commit fund tx…');
+      let fundTxid;
+      try {
+        fundTxid = await broadcastTxHex(electrsBase, cachedFundHex);
+      } catch (e) {
+        await patchPendingCapture(attestation, {
+          last_error: `commit fund broadcast failed: ${e.message}`,
+          retry_count: (row.retry_count ?? 0) + 1,
+        });
+        throw e;
+      }
+      row = await patchPendingCapture(attestation, {
+        commit_fund_txid: fundTxid,
+        last_error: null,
       });
-      throw e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    // Reveal broadcast (skipped if commit_reveal_txid already persisted).
+    if (!row.commit_reveal_txid) {
+      setMintStatusUi('Broadcasting commit reveal tx…');
+      let revealTxid;
+      try {
+        revealTxid = await broadcastTxHex(electrsBase, cachedRevealHex);
+      } catch (e) {
+        await patchPendingCapture(attestation, {
+          last_error: `commit reveal broadcast failed (fund_txid ${row.commit_fund_txid} stranded): ${e.message}`,
+          retry_count: (row.retry_count ?? 0) + 1,
+        });
+        throw e;
+      }
+      row = await patchPendingCapture(attestation, {
+        commit_reveal_txid: revealTxid,
+        last_error: null,
+      });
     }
 
     row = await transitionPendingCapture(attestation, 'commit_broadcast', {
-      commit_inscription_id: result.inscriptionId,
-      commit_reveal_txid: revealTxid,
+      commit_inscription_id: cachedInscriptionId,
       last_error: null,
     });
-    log(`direct-mint: commit broadcast ${result.inscriptionId}`, 'ok');
+    log(`direct-mint: commit broadcast ${cachedInscriptionId}`, 'ok');
   }
 
   // ---- Step 2: register commit (best-effort) + advance state ----
@@ -4084,67 +4109,98 @@ async function runDirectMintFlow(attestation) {
   }
 
   // ---- Step 4: inscribe mint ----
+  // Same recovery-aware shape as Step 1 above. Stranded state refuses
+  // to re-sign + double-spend; recovery reuses cached signed hexes;
+  // fresh state signs once + caches before any broadcast.
   if (row.status === 'pending_mint') {
-    const mintRecord = buildPokemonMintRecord({
-      commitRecord: row.commit_record,
-      commitInscriptionId: row.commit_inscription_id,
-      privateReveal: row.private_reveal,
-      speciesResolver: (id) => getSpeciesByInternalId(state.speciesCatalog, id),
-      resolveSpriteImage: state.spritePack.resolver,
-    });
-    setMintStatusUi('Inscribing mint (2 wallet popups: fund + reveal)…');
-    log(`direct-mint: inscribing mint for ${attestation.slice(0, 12)}…`, 'capture');
-    const bodyBytes = new TextEncoder().encode(JSON.stringify(mintRecord));
-    let result;
-    try {
-      result = await inscribePayloadOnChain({
-        inscriber, network: row.network, bodyBytes, mime: 'application/json',
-        signPsbtViaWallet: signPsbt, walletAddress, publicKeyHex, electrsBase,
-      });
-    } catch (e) {
-      await patchPendingCapture(attestation, {
-        last_error: `mint build/sign failed: ${e.message}`,
-        retry_count: (row.retry_count ?? 0) + 1,
-      });
-      throw e;
+    const recovery = detectMintRecoveryState(row);
+    if (recovery.state === 'stranded') {
+      throw new Error(recovery.reason);
     }
-    // Same progressive-persist pattern as commit broadcast.
-    setMintStatusUi('Broadcasting mint fund tx…');
-    let mintFundTxid;
-    try {
-      mintFundTxid = await broadcastTxHex(electrsBase, result.fundTxHex);
-    } catch (e) {
-      await patchPendingCapture(attestation, {
-        last_error: `mint fund broadcast failed: ${e.message}`,
-        retry_count: (row.retry_count ?? 0) + 1,
+
+    let cachedFundHex = row.mint_fund_tx_hex;
+    let cachedRevealHex = row.mint_reveal_tx_hex;
+    let cachedInscriptionId = row.mint_inscription_id;
+
+    if (recovery.state === 'fresh') {
+      const mintRecord = buildPokemonMintRecord({
+        commitRecord: row.commit_record,
+        commitInscriptionId: row.commit_inscription_id,
+        privateReveal: row.private_reveal,
+        speciesResolver: (id) => getSpeciesByInternalId(state.speciesCatalog, id),
+        resolveSpriteImage: state.spritePack.resolver,
       });
-      throw e;
+      setMintStatusUi('Inscribing mint (2 wallet popups: fund + reveal)…');
+      log(`direct-mint: inscribing mint for ${attestation.slice(0, 12)}…`, 'capture');
+      const bodyBytes = new TextEncoder().encode(JSON.stringify(mintRecord));
+      let result;
+      try {
+        result = await inscribePayloadOnChain({
+          inscriber, network: row.network, bodyBytes, mime: 'application/json',
+          signPsbtViaWallet: signPsbt, walletAddress, publicKeyHex, electrsBase,
+        });
+      } catch (e) {
+        await patchPendingCapture(attestation, {
+          last_error: `mint build/sign failed: ${e.message}`,
+          retry_count: (row.retry_count ?? 0) + 1,
+        });
+        throw e;
+      }
+      row = await patchPendingCapture(attestation, {
+        mint_fund_tx_hex: result.fundTxHex,
+        mint_reveal_tx_hex: result.revealTxHex,
+        last_error: null,
+      });
+      cachedFundHex = result.fundTxHex;
+      cachedRevealHex = result.revealTxHex;
+      cachedInscriptionId = result.inscriptionId;
+    } else {
+      log(`direct-mint: resuming mint from cached signed hexes (recovery)`, 'warn');
+      setMintStatusUi('Recovery: re-broadcasting whichever mint tx is missing…');
     }
-    row = await patchPendingCapture(attestation, {
-      mint_fund_txid: mintFundTxid,
-      last_error: null,
-    });
 
-    await new Promise((r) => setTimeout(r, 1500));
-
-    setMintStatusUi('Broadcasting mint reveal tx…');
-    let mintRevealTxid;
-    try {
-      mintRevealTxid = await broadcastTxHex(electrsBase, result.revealTxHex);
-    } catch (e) {
-      await patchPendingCapture(attestation, {
-        last_error: `mint reveal broadcast failed (fund_txid ${mintFundTxid} stranded): ${e.message}`,
-        retry_count: (row.retry_count ?? 0) + 1,
+    if (!row.mint_fund_txid) {
+      setMintStatusUi('Broadcasting mint fund tx…');
+      let mintFundTxid;
+      try {
+        mintFundTxid = await broadcastTxHex(electrsBase, cachedFundHex);
+      } catch (e) {
+        await patchPendingCapture(attestation, {
+          last_error: `mint fund broadcast failed: ${e.message}`,
+          retry_count: (row.retry_count ?? 0) + 1,
+        });
+        throw e;
+      }
+      row = await patchPendingCapture(attestation, {
+        mint_fund_txid: mintFundTxid,
+        last_error: null,
       });
-      throw e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    if (!row.mint_reveal_txid) {
+      setMintStatusUi('Broadcasting mint reveal tx…');
+      let mintRevealTxid;
+      try {
+        mintRevealTxid = await broadcastTxHex(electrsBase, cachedRevealHex);
+      } catch (e) {
+        await patchPendingCapture(attestation, {
+          last_error: `mint reveal broadcast failed (fund_txid ${row.mint_fund_txid} stranded): ${e.message}`,
+          retry_count: (row.retry_count ?? 0) + 1,
+        });
+        throw e;
+      }
+      row = await patchPendingCapture(attestation, {
+        mint_reveal_txid: mintRevealTxid,
+        last_error: null,
+      });
     }
 
     row = await transitionPendingCapture(attestation, 'mint_broadcast', {
-      mint_inscription_id: result.inscriptionId,
-      mint_reveal_txid: mintRevealTxid,
+      mint_inscription_id: cachedInscriptionId,
       last_error: null,
     });
-    log(`direct-mint: mint broadcast ${result.inscriptionId}`, 'ok');
+    log(`direct-mint: mint broadcast ${cachedInscriptionId}`, 'ok');
   }
 
   // ---- Step 5: register mint (best-effort) + advance state ----

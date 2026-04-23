@@ -162,6 +162,17 @@ export function makePendingCaptureRow({
     preview_species_name: previewSpeciesName ?? null,
     preview_level: previewLevel ?? null,
     pending_registrations: [],
+    // Signed-but-not-yet-broadcast tx hexes. The direct mint flow
+    // caches these BEFORE attempting any broadcast so a partial
+    // failure (fund OK, reveal KO) can recover by rebroadcasting only
+    // the missing tx — no second wallet popup, no double-spend of
+    // already-broadcast UTXOs. Cleared (kept null) once we've confirmed
+    // both txids are persisted; can be cleared again post-mint to free
+    // IDB. Each hex is a few hundred bytes — fine for IDB.
+    commit_fund_tx_hex: null,
+    commit_reveal_tx_hex: null,
+    mint_fund_tx_hex: null,
+    mint_reveal_tx_hex: null,
   };
 }
 
@@ -169,6 +180,48 @@ export function cancelAllowed(status) {
   if (PENDING_CAPTURE_MINT_LOCKED.has(status)) return false;
   if (PENDING_CAPTURE_TERMINAL.has(status)) return false;
   return true;
+}
+
+// Decide what action the direct-mint flow should take when entering
+// the commit step. Three buckets:
+//   - 'fresh': no commit artifact → safe to sign + broadcast normally
+//   - 'recovery': partial broadcast happened AND signed hexes are
+//     cached → re-broadcast only the missing tx, no new wallet popup
+//   - 'stranded': partial broadcast happened BUT signed hexes are
+//     missing → manual recovery required (cancel or wait); DO NOT
+//     allow the flow to call the inscriber lib again, that would
+//     double-spend the already-broadcast fund tx.
+export function detectCommitRecoveryState(row) {
+  const hasArtifact = Boolean(
+    row.commit_fund_txid
+    || row.commit_reveal_txid
+    || row.commit_inscription_id,
+  );
+  const hasHexes = Boolean(row.commit_fund_tx_hex && row.commit_reveal_tx_hex);
+  if (!hasArtifact) return { state: 'fresh', canProceed: true };
+  if (hasHexes) return { state: 'recovery', canProceed: true };
+  return {
+    state: 'stranded',
+    canProceed: false,
+    reason: `commit broadcast partial (fund_txid=${row.commit_fund_txid ?? '∅'}, reveal_txid=${row.commit_reveal_txid ?? '∅'}) but signed hexes are not cached locally — manual recovery required (Cancel + accept fund as wasted, or wait for the broadcast to confirm so the indexer can pick it up).`,
+  };
+}
+
+// Same logic for the mint side.
+export function detectMintRecoveryState(row) {
+  const hasArtifact = Boolean(
+    row.mint_fund_txid
+    || row.mint_reveal_txid
+    || row.mint_inscription_id,
+  );
+  const hasHexes = Boolean(row.mint_fund_tx_hex && row.mint_reveal_tx_hex);
+  if (!hasArtifact) return { state: 'fresh', canProceed: true };
+  if (hasHexes) return { state: 'recovery', canProceed: true };
+  return {
+    state: 'stranded',
+    canProceed: false,
+    reason: `mint broadcast partial (fund_txid=${row.mint_fund_txid ?? '∅'}, reveal_txid=${row.mint_reveal_txid ?? '∅'}) but signed hexes are not cached locally — manual recovery required.`,
+  };
 }
 
 const browserExports = {
@@ -181,6 +234,8 @@ const browserExports = {
   assertPendingTransition,
   makePendingCaptureRow,
   cancelAllowed,
+  detectCommitRecoveryState,
+  detectMintRecoveryState,
 };
 
 if (typeof window !== 'undefined') {
