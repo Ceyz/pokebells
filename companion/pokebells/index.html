@@ -600,11 +600,14 @@
   const WRAM_BYTE_LENGTH = 0x2000;
   const ATTESTATION_SCHEME_V1_1 = "sha256:block_hash+wram8k_bank0_bank1+svbk+signed_wallet+session_sequence:v1.1";
   const ATTESTATION_SCHEME_V2 = "sha256:block_hash+ram_snapshot_hash+svbk+signed_wallet+session_sequence+ivs_commitment:v2";
-  const ATTESTATION_SCHEME = ATTESTATION_SCHEME_V2;
+  const ATTESTATION_SCHEME_V2_1 = "sha256:block_hash+ram_snapshot_hash+svbk+signed_wallet+session_sequence+ivs_commitment+party_slot_index:v2.1";
+  const ATTESTATION_SCHEME = ATTESTATION_SCHEME_V2;     // legacy v1.4 default
   const IVS_COMMITMENT_SCHEME = "sha256:canonical(ivs)+salt_32b:v1";
+  const RAM_COMMITMENT_SCHEME_V1 = "sha256:wram8k:v1";
   const GEN2_SPECIES_MIN = 1;
   const GEN2_SPECIES_MAX = 251;
-  const CAPTURE_SCHEMA_VERSION = "1.4";
+  const CAPTURE_SCHEMA_VERSION = "1.4";          // legacy
+  const CAPTURE_SCHEMA_VERSION_V1_5 = "1.5";     // current
   const ELECTRS_BASE_URLS = {
     "bells-mainnet": "https://api.nintondo.io",
     "bells-testnet": "https://bells-testnet-api.nintondo.io",
@@ -870,10 +873,120 @@
     }
   });
 
+  // v1.5 wrapper validator. The game tab's "Copy + open companion" flow
+  // copies a JSON wrapper { _pokebells_clipboard_v1, schema_version,
+  // commit_record, private_reveal, preview }. Returns the same {ok, parsed}
+  // shape as validateCaptureJson but `parsed` carries an extra
+  // `_v15` field with the commit_record + private_reveal so the
+  // direct-mint handler can drive the inscriber. Block-hash existence
+  // check is done lazily (best-effort, matches GPT round 4 manual
+  // fallback rule).
+  const validateV15WrapperJson = async (parsed) => {
+    if (parsed.schema_version !== CAPTURE_SCHEMA_VERSION_V1_5) {
+      return { ok: false, error: `wrapper schema_version must equal "${CAPTURE_SCHEMA_VERSION_V1_5}"` };
+    }
+    const commit = parsed.commit_record;
+    const reveal = parsed.private_reveal;
+    if (!commit || typeof commit !== "object") {
+      return { ok: false, error: "wrapper missing commit_record" };
+    }
+    if (!reveal || typeof reveal !== "object") {
+      return { ok: false, error: "wrapper missing private_reveal — companion needs preimages to build the mint" };
+    }
+    if (commit.p !== "pokebells") return { ok: false, error: 'commit_record.p must equal "pokebells"' };
+    if (commit.op !== "capture_commit") return { ok: false, error: 'commit_record.op must equal "capture_commit"' };
+    if (commit.schema_version !== CAPTURE_SCHEMA_VERSION_V1_5) {
+      return { ok: false, error: `commit_record.schema_version must equal "${CAPTURE_SCHEMA_VERSION_V1_5}"` };
+    }
+    if (commit.attestation_scheme !== ATTESTATION_SCHEME_V2_1) {
+      return { ok: false, error: `commit_record.attestation_scheme must equal v2.1` };
+    }
+    if (commit.ram_commitment_scheme !== RAM_COMMITMENT_SCHEME_V1) {
+      return { ok: false, error: `commit_record.ram_commitment_scheme must equal "${RAM_COMMITMENT_SCHEME_V1}"` };
+    }
+    if (!Number.isInteger(commit.party_slot_index)
+        || commit.party_slot_index < 1 || commit.party_slot_index > 6) {
+      return { ok: false, error: "commit_record.party_slot_index must be integer 1..6" };
+    }
+    if (!HEX64_RE.test(String(commit.attestation ?? ""))) {
+      return { ok: false, error: "commit_record.attestation must be 64-char hex" };
+    }
+    if (!HEX64_RE.test(String(commit.ivs_commitment ?? ""))) {
+      return { ok: false, error: "commit_record.ivs_commitment must be 64-char hex" };
+    }
+    if (!HEX64_RE.test(String(commit.ram_snapshot_hash ?? ""))) {
+      return { ok: false, error: "commit_record.ram_snapshot_hash must be 64-char hex" };
+    }
+    if (!HEX64_RE.test(String(commit.block_hash_at_capture ?? ""))) {
+      return { ok: false, error: "commit_record.block_hash_at_capture must be 64-char hex" };
+    }
+    if (!HEX64_RE.test(String(commit.game_rom_sha256 ?? ""))) {
+      return { ok: false, error: "commit_record.game_rom_sha256 must be 64-char hex" };
+    }
+    if (commit.svbk_at_capture !== 1) {
+      return { ok: false, error: "commit_record.svbk_at_capture must equal 1" };
+    }
+    if (typeof commit.signed_in_wallet !== "string" || !commit.signed_in_wallet.trim()) {
+      return { ok: false, error: "commit_record.signed_in_wallet must be present" };
+    }
+    if (commit.capture_network !== "bells-mainnet" && commit.capture_network !== "bells-testnet") {
+      return { ok: false, error: "commit_record.capture_network must be bells-mainnet or bells-testnet" };
+    }
+    // Private reveal preimages
+    const ivs = reveal.ivs ?? {};
+    for (const k of ["atk", "def", "spe"]) {
+      if (!Number.isInteger(ivs[k]) || ivs[k] < 0 || ivs[k] > 15) {
+        return { ok: false, error: `private_reveal.ivs.${k} must be integer 0..15` };
+      }
+    }
+    const spd = Number.isInteger(ivs.spd) ? ivs.spd : ivs.spc;
+    if (!Number.isInteger(spd) || spd < 0 || spd > 15) {
+      return { ok: false, error: "private_reveal.ivs.spd (or spc) must be integer 0..15" };
+    }
+    if (!HEX64_RE.test(String(reveal.ivs_salt_hex ?? ""))) {
+      return { ok: false, error: "private_reveal.ivs_salt_hex must be 64-char hex" };
+    }
+    if (typeof reveal.ram_snapshot_base64 !== "string" || reveal.ram_snapshot_base64.length === 0) {
+      return { ok: false, error: "private_reveal.ram_snapshot_base64 must be a non-empty base64 string" };
+    }
+    // Best-effort block-hash existence check (non-blocking per
+    // SHELL-V1.5-PIPELINE.md amendment 3).
+    const electrsBaseUrl = resolveElectrsBaseUrl(commit.capture_network);
+    if (electrsBaseUrl) {
+      try {
+        const resp = await fetch(`${electrsBaseUrl}/block/${String(commit.block_hash_at_capture).toLowerCase()}`,
+          { headers: { accept: "application/json" } });
+        if (!resp.ok) {
+          log(`block hash lookup soft-failed (${resp.status}); proceeding anyway`);
+        }
+      } catch (e) {
+        log(`block hash lookup soft-failed (${e.message}); proceeding anyway`);
+      }
+    }
+    return {
+      ok: true,
+      parsed: {
+        // Compatibility surface for renderCaptureCard / register flow:
+        ...commit,
+        species_id: parsed.preview?.species_id ?? null,
+        species_name: parsed.preview?.species_name ?? null,
+        level: parsed.preview?.level ?? null,
+        // v1.5-only payload the direct-mint handler needs:
+        _v15: { commit_record: commit, private_reveal: reveal, preview: parsed.preview ?? null },
+      },
+    };
+  };
+
   const validateCaptureJson = async (raw) => {
     let parsed;
     try { parsed = JSON.parse(raw); }
     catch (e) { return { ok: false, error: `invalid JSON: ${e.message}` }; }
+
+    // v1.5 wrapper detection — game tab's openCaptureHandoffCompanion
+    // copies this format (JSON containing commit_record + private_reveal).
+    if (parsed && parsed._pokebells_clipboard_v1 === true) {
+      return validateV15WrapperJson(parsed);
+    }
 
     if (parsed.p !== "pokebells") return { ok: false, error: 'field "p" must equal "pokebells"' };
     if (parsed.op !== "capture") return { ok: false, error: 'field "op" must equal "capture"' };
@@ -1254,6 +1367,24 @@
       return;
     }
     const parsedCapture = JSON.parse(validatedJson);
+
+    // v1.5 wrapper path. The full commit + mint pipeline (lazy-import
+    // capture-core.mjs to build the mint body, inscribe both, POST
+    // /api/captures + /api/mints) is the next commit (Step 6c). For
+    // now, surface a clear pointer to the game tab's "Mint here
+    // (direct)" button which already runs the v1.5 pipeline end-to-end
+    // with the same wallet — no paste needed.
+    if (parsedCapture._v15) {
+      setDirectMintStatus(
+        "v1.5 wrapper detected. Companion v1.5 mint pipeline lands in the next commit. " +
+        "Meanwhile, use 'Mint here (direct)' in the game tab — same canonical flow, " +
+        "but the game tab already has the inscriber wired for commit + mint.",
+        "warn",
+      );
+      log("v1.5 wrapper paste accepted but companion mint pipeline not yet wired. Use game tab.");
+      return;
+    }
+
     const attestation = String(parsedCapture.attestation ?? "").toLowerCase();
     const networkKey = normalizeNetworkKey(parsedCapture.capture_network);
     if (!networkKey) {

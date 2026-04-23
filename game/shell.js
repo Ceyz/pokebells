@@ -2121,14 +2121,62 @@ function closeCaptureHandoff({ clearPayload = false, silent = false } = {}) {
   }
 }
 
+// v1.5 clipboard wrapper for the companion paste flow. Carries both
+// the on-chain commit body and the privateReveal preimages so the
+// companion (which lives on a different origin from the game in prod
+// → can't read game's IDB) can run the full direct-mint pipeline
+// without re-deriving anything. The wrapper format is versioned so a
+// stale companion can detect mismatch + refuse to mint instead of
+// silently misinterpreting fields.
+//
+// SECURITY NOTE: privateReveal is sensitive (salt + RAM snapshot).
+// The clipboard write happens at user-initiated handoff time only —
+// the user already chose to send these fields to the companion. The
+// browser clipboard is overwritten on the next copy, so the leak
+// surface is limited to "until next clipboard write".
+function buildCompanionClipboardBundleV15(view) {
+  return {
+    _pokebells_clipboard_v1: true,    // marker so companion validators recognize the format
+    schema_version: '1.5',
+    commit_record: null,              // filled below
+    private_reveal: null,             // filled below
+    preview: {
+      species_id: view.species_id ?? null,
+      species_name: view.species_name ?? null,
+      level: view.level ?? null,
+      attestation: view.attestation ?? null,
+    },
+  };
+}
+
 async function openCaptureHandoffCompanion() {
   const payload = state.ui.captureHandoff.payload ?? state.capture.lastPayload;
   if (!payload) {
     throw new Error('No capture payload is ready for companion minting.');
   }
+  if (!payload.attestation) {
+    throw new Error('Capture payload missing attestation — cannot resolve pendingCaptures row.');
+  }
+
+  // Read the v1.5 pending row to assemble the clipboard wrapper.
+  // Falls back to the legacy v1.4 payload JSON if no row is found
+  // (defensive — shouldn't happen post-v1.5 producer refactor, but
+  // keeps the legacy "Copy + open companion" path functional if a
+  // user has stale state from a pre-refactor session).
+  const pendingRow = await getPendingCapture(payload.attestation).catch(() => null);
+  let clipboardText;
+  if (pendingRow?.commit_record && pendingRow?.private_reveal) {
+    const bundle = buildCompanionClipboardBundleV15(payload);
+    bundle.commit_record = pendingRow.commit_record;
+    bundle.private_reveal = pendingRow.private_reveal;
+    clipboardText = JSON.stringify(bundle, null, 2);
+  } else {
+    log('No v1.5 pendingCaptures row found — falling back to legacy v1.4 payload copy.', 'warn');
+    clipboardText = getCapturePayloadJson(payload);
+  }
 
   const copyPromise = navigator.clipboard?.writeText
-    ? navigator.clipboard.writeText(getCapturePayloadJson(payload))
+    ? navigator.clipboard.writeText(clipboardText)
       .then(() => true)
       .catch((error) => {
         log(`Clipboard failed: ${error.message}. Copy the Capture JSON panel manually.`, 'warn');
@@ -2150,7 +2198,8 @@ async function openCaptureHandoffCompanion() {
   const copied = await copyPromise;
   if (copied) {
     state.ui.captureHandoff.copied = true;
-    log('Capture JSON copied. Paste it into the companion mint box, then open the Inscriber.', 'ok');
+    const kind = pendingRow?.commit_record ? 'v1.5 wrapper (commit + privateReveal)' : 'legacy v1.4 capture JSON';
+    log(`${kind} copied. Paste it into the companion mint box.`, 'ok');
   }
 
   renderCaptureHandoffModal(payload);
