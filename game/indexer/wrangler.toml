@@ -16,6 +16,17 @@ CONTENT_BASE_MAINNET = "https://bells-mainnet-content.nintondo.io/content/"
 CONTENT_BASE_TESTNET = "https://bells-testnet-content.nintondo.io/content/"
 ELECTRS_BASE_MAINNET = "https://api.nintondo.io"
 ELECTRS_BASE_TESTNET = "https://bells-testnet-api.nintondo.io"
+# Niveau 2 chain scan. Point at a self-hosted Nintondo/ord instance
+# (Rust + bellsd --txindex) for full enumeration, or leave default —
+# the scan is a graceful no-op while ord.nintondo.io returns 502.
+ORD_BASE_MAINNET = "https://ord.nintondo.io"
+ORD_BASE_TESTNET = "https://ord-testnet.nintondo.io"
+
+# Scheduled handler — runs drainIngestionQueue + scanChainForPokebells.
+# Every 5 minutes is a good balance between freshness (POST-404 retries
+# land quickly) and CF Worker cron quota (1 cron trigger, no cost).
+[triggers]
+crons = ["*/5 * * * *"]
 
 # Custom domain binding — uncomment after first deploy + DNS verification.
 # Requires CLOUDFLARE_API_TOKEN scoped Workers Scripts:Edit + Zone:DNS:Edit.

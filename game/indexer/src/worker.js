@@ -28,9 +28,13 @@
 //   - capture_content_sha256 collision elsewhere → 422 content_duplicate
 //   - ram_snapshot_hash collision elsewhere      → 422 snapshot_replay
 //
-// No chain scanning: Nintondo has no public inscription-listing API. Captures
-// minted outside the companion flow are by-design excluded from the official
-// collection (same policy as the on-chain spec).
+// Async pipeline: POST endpoints enqueue on content-404 (Nintondo content host
+// lag after block confirmation). A Cron Trigger (see wrangler.toml) drains
+// `ingestion_queue` every few minutes + retries the fetch + validate chain.
+// Clients no longer need to retry client-side or poll — POST once, the
+// indexer owns the delivery. Chain scan cron (niveau 2) enumerates
+// `p:pokebells` inscriptions via Nintondo's RSC API so mints done outside
+// our companion still land in the collection.
 
 import {
   fetchAndValidateInscription, validateReveal, validateSaveSnapshot,
@@ -46,7 +50,18 @@ import {
   insertCommit, commitExists, commitById,
   insertPokemon, pokemonExists, pokemonByCommit,
   pokemonByOwner, pokemonBySpecies,
+  enqueueForIngestion, dequeueIngestion, bumpIngestionRetry,
+  claimDueQueueEntries, INGESTION_QUEUE_MAX_ATTEMPTS,
+  readScanCursor, writeScanCursor,
 } from "./db.js";
+
+// Exponential-ish backoff for queue retries: 1m, 2m, 5m, 10m, 20m,
+// capped at 30m. At 24 attempts that's roughly 11-12h total wait
+// before the queue gives up.
+function nextQueueRetrySeconds(attempts) {
+  const base = Math.min(60 * Math.pow(1.8, Math.max(0, attempts)), 1800);
+  return Math.floor(Date.now() / 1000) + Math.floor(base);
+}
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -110,6 +125,21 @@ async function handlePostCapture(request, env) {
 
   const result = await fetchAndValidateInscription(inscriptionId, network, env);
   if (!result.ok) {
+    // Content host lag: the tx confirmed but Nintondo's ord index hasn't
+    // served it yet. Enqueue + return 202 so the client can consider the
+    // call "delivered" and forget about it. The scheduled drain
+    // (wrangler.toml cron) replays this same endpoint every few minutes
+    // until the content catches up.
+    if (result.stage === "fetch" && /404/.test(String(result.reason ?? ""))) {
+      await enqueueForIngestion(env, inscriptionId, "capture", network, {
+        lastError: result.reason,
+      });
+      await logIngestion(env, inscriptionId, "capture", network, "queued", result.reason, ipPrefix);
+      return json(
+        { ok: true, status: "queued", reason: "content host not ready, queued for retry", inscription_id: inscriptionId },
+        { status: 202 },
+      );
+    }
     await logIngestion(env, inscriptionId, "capture", network, "invalid", `${result.stage}: ${result.reason}`, ipPrefix);
     return json(
       { ok: false, error: "validation_failed", stage: result.stage, reason: result.reason },
@@ -229,6 +259,14 @@ async function handlePostReveal(request, env) {
 
   const fetched = await fetchAndValidateInscription(inscriptionId, network, env);
   if (!fetched.ok) {
+    if (fetched.stage === "fetch" && /404/.test(String(fetched.reason ?? ""))) {
+      await enqueueForIngestion(env, inscriptionId, "reveal", network, { lastError: fetched.reason });
+      await logIngestion(env, inscriptionId, "reveal", network, "queued", fetched.reason, ipPrefix);
+      return json(
+        { ok: true, status: "queued", inscription_id: inscriptionId },
+        { status: 202 },
+      );
+    }
     await logIngestion(env, inscriptionId, "reveal", network, "invalid", `${fetched.stage}: ${fetched.reason}`, ipPrefix);
     return json(
       { ok: false, error: "validation_failed", stage: fetched.stage, reason: fetched.reason },
@@ -321,6 +359,14 @@ async function handlePostMint(request, env) {
 
   const fetched = await fetchAndValidateInscription(inscriptionId, network, env);
   if (!fetched.ok) {
+    if (fetched.stage === "fetch" && /404/.test(String(fetched.reason ?? ""))) {
+      await enqueueForIngestion(env, inscriptionId, "mint", network, { lastError: fetched.reason });
+      await logIngestion(env, inscriptionId, "mint", network, "queued", fetched.reason, ipPrefix);
+      return json(
+        { ok: true, status: "queued", inscription_id: inscriptionId },
+        { status: 202 },
+      );
+    }
     await logIngestion(env, inscriptionId, "mint", network, "invalid", `${fetched.stage}: ${fetched.reason}`, ipPrefix);
     return json(
       { ok: false, error: "validation_failed", stage: fetched.stage, reason: fetched.reason },
@@ -799,4 +845,269 @@ export default {
 
     return json({ ok: false, error: "not_found", path: url.pathname }, { status: 404 });
   },
+
+  // Cron-triggered entry point. See wrangler.toml [triggers] for cadence.
+  // Two jobs run in parallel via waitUntil:
+  //   1. drainIngestionQueue — replay POSTs that hit a 404 on first try
+  //      (Nintondo content host lag after block confirmation).
+  //   2. scanChainForPokebells — niveau 2. Enumerate `p:pokebells`
+  //      inscriptions directly from the chain so mints done outside our
+  //      companion still land in the collection.
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(drainIngestionQueue(env).catch((e) => {
+      console.error("[cron] drainIngestionQueue failed:", e?.message ?? e);
+    }));
+    ctx.waitUntil(scanChainForPokebells(env).catch((e) => {
+      console.error("[cron] scanChainForPokebells failed:", e?.message ?? e);
+    }));
+  },
 };
+
+// ======================================================================
+// Niveau 1 — async retry queue drain
+// ======================================================================
+
+async function drainIngestionQueue(env) {
+  const due = await claimDueQueueEntries(env, 25);
+  if (!due.length) return { drained: 0 };
+
+  let ok = 0, requeued = 0, dropped = 0;
+  for (const entry of due) {
+    const outcome = await processQueueEntry(env, entry);
+    if (outcome === "ok") ok++;
+    else if (outcome === "dropped") dropped++;
+    else requeued++;
+  }
+  return { drained: due.length, ok, requeued, dropped };
+}
+
+// Re-runs the same pipeline the POST handler would. On success, removes
+// from the queue. On retryable failure (content still 404), bumps
+// retry_after. On permanent failure (validator hard-fail, schema
+// rejection) or exhausted attempts, drops + logs.
+async function processQueueEntry(env, entry) {
+  const { inscription_id: id, kind, network, attempts } = entry;
+
+  if (attempts >= INGESTION_QUEUE_MAX_ATTEMPTS) {
+    await dequeueIngestion(env, id, kind);
+    await logIngestion(env, id, kind, network, "queue_abandoned",
+      `attempts=${attempts} ${entry.last_error ?? ""}`, null);
+    return "dropped";
+  }
+
+  // Short-circuit if something else (manual POST from companion) already
+  // registered this id between enqueue and now.
+  if (kind === "capture" && await captureExists(env, id)) {
+    await dequeueIngestion(env, id, kind); return "ok";
+  }
+  if (kind === "capture_commit" && await commitExists(env, id)) {
+    await dequeueIngestion(env, id, kind); return "ok";
+  }
+  if (kind === "reveal" && await revealExists(env, id)) {
+    await dequeueIngestion(env, id, kind); return "ok";
+  }
+  if (kind === "mint" && await pokemonExists(env, id)) {
+    await dequeueIngestion(env, id, kind); return "ok";
+  }
+
+  // Re-run the validator. If content is still 404, bump the retry
+  // counter. Otherwise drop (permanent fail) or process.
+  const result = await fetchAndValidateInscription(id, network, env);
+  if (!result.ok) {
+    const stillFetchFailure = result.stage === "fetch";
+    if (stillFetchFailure) {
+      await bumpIngestionRetry(env, id, kind,
+        nextQueueRetrySeconds(attempts + 1), result.reason);
+      return "requeued";
+    }
+    await dequeueIngestion(env, id, kind);
+    await logIngestion(env, id, kind, network, "invalid_via_queue",
+      `${result.stage}: ${result.reason}`, null);
+    return "dropped";
+  }
+
+  // Content fetched + validated. Route by actual op (may differ from
+  // originally enqueued kind if the chain state has since evolved).
+  try {
+    if (result.kind === "capture_commit") {
+      const cn = result.normalized;
+      cn.inscription_id = id;
+      await insertCommit(env, id, cn, result.raw);
+    } else if (result.kind === "capture") {
+      const n = result.normalized;
+      const contentConflict = await findContentSha256Conflict(env, n.capture_content_sha256, id);
+      if (contentConflict) {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          `content_duplicate of ${contentConflict}`, null);
+        return "dropped";
+      }
+      const snapshotConflict = await findRamSnapshotHashConflict(env, n.ram_snapshot_hash, id);
+      if (snapshotConflict) {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          `snapshot_replay of ${snapshotConflict}`, null);
+        return "dropped";
+      }
+      await insertCapture(env, id, n.signed_in_wallet, n, result.raw);
+    } else if (result.kind === "mint") {
+      // v1.5 mint: owner-verify + commit backref + row insert.
+      const n = result.normalized;
+      const commitRow = await commitById(env, n.capture_commit_inscription_id);
+      if (!commitRow) {
+        // Commit hasn't landed yet — keep waiting.
+        await bumpIngestionRetry(env, id, kind,
+          nextQueueRetrySeconds(attempts + 1), "commit_not_yet_indexed");
+        return "requeued";
+      }
+      const ownerCheck = await verifyMintOwner(id, network, env);
+      if (!ownerCheck.ok && network === "bells-mainnet") {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          `owner_mismatch: ${ownerCheck.reason}`, null);
+        return "dropped";
+      }
+      await insertPokemon(env, id, n.signed_in_wallet, n, result.raw);
+    } else if (result.kind === "reveal") {
+      // Reveal: apply to existing capture row.
+      await insertReveal(env, id, result.normalized, result.raw);
+      await applyRevealToCapture(env, result.normalized.capture_inscription_id, id, result.normalized);
+    }
+    await dequeueIngestion(env, id, kind);
+    await logIngestion(env, id, kind, network, "ok_via_queue", null, null);
+    return "ok";
+  } catch (e) {
+    // DB error (or unexpected) — requeue with retry.
+    await bumpIngestionRetry(env, id, kind,
+      nextQueueRetrySeconds(attempts + 1), e?.message ?? String(e));
+    return "requeued";
+  }
+}
+
+// ======================================================================
+// Niveau 2 — autonomous chain scan for `p:pokebells` inscriptions
+// ======================================================================
+//
+// Goal: pick up mints, commits, reveals, evolves that were inscribed
+// outside our companion (e.g. via a third-party wallet or explorer) so
+// the indexer stays the source of truth for the collection.
+//
+// Strategy: poll Nintondo's ord HTTP API (`GET /inscriptions`, paginated).
+// For each returned id, fetch the content, check `p === "pokebells"`,
+// then dispatch to the matching POST handler logic (validate +
+// persist). Track progress with `scan_cursor` so we don't re-ingest
+// everything every tick.
+//
+// Current status (2026-04-23): `ord.nintondo.io` and
+// `ord-testnet.nintondo.io` both return 502 / fail DNS. The
+// enumeration API is the only missing piece; `/content/<id>` fetch
+// already works. When Nintondo fixes ord hosting (or we self-host
+// Nintondo/ord), this function will start succeeding without code
+// changes. Until then it is a graceful no-op that logs the probe
+// failure every cron tick — no duplicate work, no noise in D1.
+//
+// ORD_BASE env override lets operators point at a self-hosted
+// `Nintondo/ord` instance to enable full chain scan immediately.
+
+function ordBaseFor(env, network) {
+  if (network === "bells-mainnet") return env.ORD_BASE_MAINNET || "https://ord.nintondo.io";
+  if (network === "bells-testnet") return env.ORD_BASE_TESTNET || "https://ord-testnet.nintondo.io";
+  return null;
+}
+
+async function scanChainForPokebells(env) {
+  const out = { mainnet: null, testnet: null };
+  out.mainnet = await scanNetwork(env, "bells-mainnet").catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
+  out.testnet = await scanNetwork(env, "bells-testnet").catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
+  return out;
+}
+
+async function scanNetwork(env, network) {
+  const ordBase = ordBaseFor(env, network);
+  if (!ordBase) return { ok: false, reason: "no_ord_base" };
+
+  // Probe /blockheight first — cheap, diagnostic, avoids long cursor
+  // walks when ord is down.
+  const probe = await fetch(`${ordBase}/blockheight`, {
+    headers: { accept: "text/plain" },
+    signal: AbortSignal.timeout(5000),
+  }).catch((e) => ({ status: 0, _err: e?.message }));
+  if (!probe || probe.status !== 200) {
+    return {
+      ok: false,
+      network,
+      reason: `ord_probe_failed status=${probe?.status ?? 0} err=${probe?._err ?? ""}`,
+    };
+  }
+
+  const cursor = await readScanCursor(env, network, "pokebells");
+  const lastSeenId = cursor?.cursor_value ?? null;
+
+  // Fetch page 0 (most recent 100). Stop early if we hit lastSeenId.
+  const listResp = await fetch(`${ordBase}/inscriptions`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(10000),
+  }).catch((e) => ({ status: 0, _err: e?.message }));
+  if (!listResp || listResp.status !== 200) {
+    return {
+      ok: false,
+      network,
+      reason: `ord_list_failed status=${listResp?.status ?? 0} err=${listResp?._err ?? ""}`,
+    };
+  }
+
+  const listBody = await listResp.json().catch(() => null);
+  const ids = Array.isArray(listBody?.ids) ? listBody.ids : [];
+  if (!ids.length) {
+    await writeScanCursor(env, network, "pokebells", lastSeenId ?? "", 0);
+    return { ok: true, network, found: 0, newest: null };
+  }
+
+  let found = 0;
+  let newestThisPage = ids[0];
+  for (const id of ids) {
+    if (lastSeenId && id === lastSeenId) break;  // caught up
+    if (!INSCRIPTION_ID_RE.test(id)) continue;
+
+    // Skip if already in any table.
+    if (
+      await captureExists(env, id) ||
+      await commitExists(env, id) ||
+      await revealExists(env, id) ||
+      await pokemonExists(env, id)
+    ) continue;
+
+    // Lightweight content probe — fetch + op check. If op matches one
+    // of ours, delegate to the same validated path the POST handlers
+    // use (via enqueue — keeps a single code path + respects
+    // eventually-consistent content host).
+    const contentBase = network === "bells-mainnet"
+      ? env.CONTENT_BASE_MAINNET : env.CONTENT_BASE_TESTNET;
+    const cr = await fetch(`${contentBase}${id}`, {
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => null);
+    if (!cr || cr.status !== 200) continue;
+    const ct = cr.headers.get("content-type") ?? "";
+    if (!/application\/json|text\/plain/i.test(ct)) continue;
+
+    const body = await cr.json().catch(() => null);
+    if (!body || body.p !== "pokebells") continue;
+
+    const op = body.op;
+    let kind = null;
+    if (op === "capture_commit") kind = "capture_commit";
+    else if (op === "mint") kind = "mint";
+    else if (op === "reveal") kind = "reveal";
+    else if (op === "capture" || op === "catch") kind = "capture";
+    if (!kind) continue;
+
+    await enqueueForIngestion(env, id, kind, network, { retryAfter: Math.floor(Date.now() / 1000) });
+    found++;
+
+    // Polite spacing between content fetches — Nintondo host is shared.
+    await new Promise((r) => setTimeout(r, 150));
+  }
+
+  await writeScanCursor(env, network, "pokebells", newestThisPage, found);
+  return { ok: true, network, found, newest: newestThisPage };
+}

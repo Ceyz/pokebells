@@ -409,6 +409,84 @@ export async function pokemonBySpecies(env, speciesId, network, limit = 50, offs
   return rows?.results ?? [];
 }
 
+// =====================================================================
+// Async ingestion queue — niveau 1
+// =====================================================================
+// Drain target for POST /api/captures + /api/mints that hit a 404 on
+// the Nintondo content host (eventually-consistent lag). A Cron
+// Trigger on the worker scans rows where retry_after <= now and
+// replays the fetch + validate pipeline. Max 24 attempts with
+// exponential-ish backoff handled in worker.js.
+
+export async function enqueueForIngestion(env, inscriptionId, kind, network, options = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  const retryAfter = options.retryAfter ?? now + 60;  // default: retry in 1 min
+  await env.DB.prepare(`
+    INSERT INTO ingestion_queue (inscription_id, kind, network, enqueued_at, retry_after, attempts, last_error)
+    VALUES (?, ?, ?, ?, ?, 0, ?)
+    ON CONFLICT(inscription_id, kind) DO UPDATE SET
+      retry_after = excluded.retry_after,
+      last_error = excluded.last_error
+  `).bind(
+    inscriptionId, kind, network, now, retryAfter, options.lastError ?? null,
+  ).run();
+}
+
+export async function dequeueIngestion(env, inscriptionId, kind) {
+  await env.DB.prepare(
+    "DELETE FROM ingestion_queue WHERE inscription_id = ? AND kind = ?",
+  ).bind(inscriptionId, kind).run();
+}
+
+export async function bumpIngestionRetry(env, inscriptionId, kind, nextRetryAfter, error) {
+  await env.DB.prepare(`
+    UPDATE ingestion_queue SET
+      attempts = attempts + 1,
+      retry_after = ?,
+      last_error = ?
+    WHERE inscription_id = ? AND kind = ?
+  `).bind(nextRetryAfter, error ?? null, inscriptionId, kind).run();
+}
+
+export async function claimDueQueueEntries(env, limit = 25) {
+  const now = Math.floor(Date.now() / 1000);
+  const rows = await env.DB.prepare(`
+    SELECT inscription_id, kind, network, enqueued_at, retry_after, attempts, last_error
+    FROM ingestion_queue
+    WHERE retry_after <= ?
+    ORDER BY retry_after ASC
+    LIMIT ?
+  `).bind(now, limit).all();
+  return rows?.results ?? [];
+}
+
+// Give up after this many failed attempts. 24 with backoff ~doubling
+// from 1min covers a real-world 24h window before abandoning.
+export const INGESTION_QUEUE_MAX_ATTEMPTS = 24;
+
+// =====================================================================
+// Chain scan cursor — niveau 2
+// =====================================================================
+
+export async function readScanCursor(env, network, scheme) {
+  const row = await env.DB.prepare(
+    "SELECT cursor_value, last_scanned_at, last_inscriptions_found FROM scan_cursor WHERE network = ? AND scheme = ?",
+  ).bind(network, scheme).first();
+  return row ?? null;
+}
+
+export async function writeScanCursor(env, network, scheme, cursorValue, inscriptionsFound = 0) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(`
+    INSERT INTO scan_cursor (network, scheme, cursor_value, last_scanned_at, last_inscriptions_found)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(network, scheme) DO UPDATE SET
+      cursor_value = excluded.cursor_value,
+      last_scanned_at = excluded.last_scanned_at,
+      last_inscriptions_found = excluded.last_inscriptions_found
+  `).bind(network, scheme, cursorValue, now, inscriptionsFound).run();
+}
+
 export async function networkStats(env) {
   const row = await env.DB.prepare(`
     SELECT

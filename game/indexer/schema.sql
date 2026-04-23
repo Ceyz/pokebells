@@ -298,3 +298,46 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_log_inscription
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_log_time
   ON ingestion_log(ingested_at DESC);
+
+-- =====================================================================
+-- Async ingestion queue + chain scan cursor
+-- =====================================================================
+-- The Nintondo content host is eventually-consistent — txs confirm in
+-- a block, but the /content/<id> endpoint can take minutes to hours
+-- to index them. Rather than making the client side poll forever and
+-- lose state on tab close, the indexer itself keeps a retry queue.
+--
+-- POST /api/captures + /api/mints enqueue the id if content is 404,
+-- return 202 "queued" instead of 422. A scheduled Cron Trigger drains
+-- the queue every few minutes: fetch content, if 200 run through the
+-- full validator pipeline, remove from queue on success or after
+-- max_attempts.
+CREATE TABLE IF NOT EXISTS ingestion_queue (
+  inscription_id    TEXT NOT NULL,
+  kind              TEXT NOT NULL,       -- 'capture' | 'mint' | 'reveal' | 'capture_commit'
+  network           TEXT NOT NULL,
+  enqueued_at       INTEGER NOT NULL,
+  retry_after       INTEGER NOT NULL,    -- Unix seconds; cron skips entries where retry_after > now
+  attempts          INTEGER NOT NULL DEFAULT 0,
+  last_error        TEXT,
+  PRIMARY KEY (inscription_id, kind),
+  CHECK (network IN ('bells-mainnet', 'bells-testnet'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingestion_queue_retry
+  ON ingestion_queue(retry_after);
+
+-- Cursor for autonomous chain scan (niveau 2). Stores the last
+-- "block_height+tx_index" seen by the Nintondo RSC scrape so the cron
+-- doesn't re-enumerate everything every tick. Singleton row keyed by
+-- (network, scheme) — scheme lets us roll the scanner format without
+-- losing the old cursor.
+CREATE TABLE IF NOT EXISTS scan_cursor (
+  network           TEXT NOT NULL,
+  scheme            TEXT NOT NULL,       -- e.g. 'nintondo_rsc:v1'
+  cursor_value      TEXT,                -- opaque, scheme-specific
+  last_scanned_at   INTEGER NOT NULL,
+  last_inscriptions_found INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (network, scheme),
+  CHECK (network IN ('bells-mainnet', 'bells-testnet'))
+);
