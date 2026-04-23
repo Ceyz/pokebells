@@ -40,6 +40,11 @@ test-nintondo.html
 tools/*
 !tools/package-indexer-for-inscription.mjs
 !tools/apply-d1-schema.mjs
+!tools/bulk-inscribe.mjs
+!tools/bulk-inscribe.test.mjs
+!tools/gen-bells-wallet.mjs
+!tools/BULK-INSCRIBE.md
+tools/bulk-inscribe-state.*.json
 !tools/pokebells-inscriber/
 tools/pokebells-inscriber/node_modules/
 tools/pokebells-inscriber/dist/
