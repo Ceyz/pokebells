@@ -112,8 +112,17 @@ function assertValidInscriptionId(value, label) {
   if (typeof value !== 'string' || !/^[0-9a-f]{64}i\d+$/i.test(value)) {
     throw new Error(
       `${label} is not a valid inscription id (${JSON.stringify(value)}). `
-      + 'If this is a fresh root, set DEFAULT_*_MANIFEST_ID in boot.js to a minted '
-      + '`p:pokebells-manifest` inscription, or append `?manifest=<id>` to the URL.',
+      + 'Three ways to fix:\n'
+      + '  (a) For local dev: drop `?manifest=` from the URL entirely '
+      + '(boot.js then loads modules from relative paths). The shell\'s '
+      + '"Manifest URL" textbox is independent of boot.js — type your '
+      + 'local manifest filename there + click "Load manifest".\n'
+      + '  (b) For inscription mode with a freshly-minted root: set '
+      + 'DEFAULT_TESTNET_MANIFEST_ID / DEFAULT_MAINNET_MANIFEST_ID in '
+      + 'boot.js to the inscribed `p:pokebells-manifest` id.\n'
+      + '  (c) For ad-hoc inscription mode: append `?manifest=<inscriptionId>` '
+      + 'where <inscriptionId> is a 64-char hex string + `iN` suffix '
+      + '(e.g. `?manifest=0a1b2c…ef0i0`).',
     );
   }
 }
