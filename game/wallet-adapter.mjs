@@ -201,10 +201,24 @@ function buildWalletState({
 }
 
 async function invokeFirst(provider, methodNames, ...args) {
+  // Each probed method swallows its own error (e.g. Nintondo wallet returns
+  // code 4900 "provider disconnected from all chains" on getNetwork() when
+  // the user just unlocked the extension but hasn't actively switched to a
+  // chain yet). Without this guard, a single rejected promise kills the
+  // entire state-sync pipeline upstream → Connect button never enables.
   for (const name of methodNames) {
     const fn = provider?.[name];
     if (typeof fn === 'function') {
-      return fn.apply(provider, args);
+      try {
+        return await fn.apply(provider, args);
+      } catch (error) {
+        // Surface in console for debugging, but don't propagate. Adapter
+        // upstream falls back to undefined → disconnected/available logic
+        // continues to work and Connect remains clickable.
+        if (typeof console !== 'undefined') {
+          console.warn(`[wallet-adapter] ${name}() threw:`, error?.message ?? error);
+        }
+      }
     }
   }
   return undefined;
