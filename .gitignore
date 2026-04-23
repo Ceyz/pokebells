@@ -58,6 +58,12 @@ game/cf-relay/.wrangler/
 !game/indexer/
 game/indexer/node_modules/
 game/indexer/.wrangler/
+# Synced from game/capture-core.mjs + game/gen2-species.mjs by indexer.yml
+# at deploy time. Local devs should sync manually:
+#   cp game/capture-core.mjs game/indexer/src/capture-core.mjs
+#   cp game/gen2-species.mjs game/indexer/src/gen2-species.mjs
+game/indexer/src/capture-core.mjs
+game/indexer/src/gen2-species.mjs
 !game/signin-verify.mjs
 !game/pbrp/
 !.github/workflows/cf-relay.yml

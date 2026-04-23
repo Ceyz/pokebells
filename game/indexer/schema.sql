@@ -181,6 +181,106 @@ CREATE INDEX IF NOT EXISTS idx_saves_wallet_rom
 CREATE INDEX IF NOT EXISTS idx_saves_wallet_version
   ON saves(signed_in_wallet, save_version DESC);
 
+-- =====================================================================
+-- Schema v1.5 — capture_commit + mint (see SCHEMA-v1.5.md)
+-- =====================================================================
+
+-- capture_commit: opaque receipt, NOT in marketplace collection.
+-- Mirrors the on-chain inscription's body verbatim. Mint references
+-- this row via ref_capture_commit.
+CREATE TABLE IF NOT EXISTS commits (
+  inscription_id            TEXT PRIMARY KEY,
+  network                   TEXT NOT NULL,
+  signed_in_wallet          TEXT NOT NULL,
+  session_sequence_number   INTEGER NOT NULL,
+  block_height_at_inscribe  INTEGER,
+  block_hash_at_capture     TEXT NOT NULL,
+  game_rom_sha256           TEXT NOT NULL,
+  party_slot_index          INTEGER NOT NULL,
+  ivs_commitment            TEXT NOT NULL,
+  ivs_commitment_scheme     TEXT NOT NULL,
+  ram_snapshot_hash         TEXT NOT NULL,
+  ram_commitment_scheme     TEXT NOT NULL,
+  svbk_at_capture           INTEGER NOT NULL,
+  attestation               TEXT NOT NULL,
+  attestation_scheme        TEXT NOT NULL,
+  raw_commit_json           TEXT NOT NULL,
+  registered_at             INTEGER NOT NULL,
+  valid                     INTEGER NOT NULL DEFAULT 1,
+  reject_reason             TEXT,
+  CHECK (network IN ('bells-mainnet', 'bells-testnet')),
+  CHECK (party_slot_index BETWEEN 1 AND 6),
+  CHECK (svbk_at_capture = 1),
+  CHECK (valid IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_commits_wallet
+  ON commits(signed_in_wallet, valid);
+CREATE INDEX IF NOT EXISTS idx_commits_ram_hash
+  ON commits(ram_snapshot_hash) WHERE valid = 1;
+CREATE INDEX IF NOT EXISTS idx_commits_ivs_commitment
+  ON commits(ivs_commitment) WHERE valid = 1;
+
+-- pokemon: the canonical NFT collection. One row per validated mint.
+-- ref_capture_commit is UNIQUE — enforces "first valid mint per commit"
+-- (check #12 in SCHEMA-v1.5.md).
+CREATE TABLE IF NOT EXISTS pokemon (
+  mint_inscription_id        TEXT PRIMARY KEY,
+  ref_capture_commit         TEXT NOT NULL UNIQUE,
+  network                    TEXT NOT NULL,
+  signed_in_wallet           TEXT NOT NULL,
+  party_slot_index           INTEGER NOT NULL,
+  species_id                 INTEGER NOT NULL,
+  species_name               TEXT NOT NULL,
+  level                      INTEGER NOT NULL,
+  shiny                      INTEGER NOT NULL,
+  iv_atk                     INTEGER NOT NULL,
+  iv_def                     INTEGER NOT NULL,
+  iv_spe                     INTEGER NOT NULL,
+  iv_special                 INTEGER NOT NULL,
+  iv_hp                      INTEGER NOT NULL,
+  iv_total                   INTEGER NOT NULL,
+  ev_hp                      INTEGER,
+  ev_atk                     INTEGER,
+  ev_def                     INTEGER,
+  ev_spe                     INTEGER,
+  ev_spc                     INTEGER,
+  status                     TEXT,
+  held_item                  INTEGER,
+  friendship                 INTEGER,
+  pokerus                    INTEGER,
+  catch_rate                 INTEGER,
+  moves_json                 TEXT,
+  pp_json                    TEXT,
+  name                       TEXT NOT NULL,
+  description                TEXT,
+  image                      TEXT NOT NULL,
+  attributes_json            TEXT NOT NULL,
+  raw_mint_json              TEXT NOT NULL,
+  registered_at              INTEGER NOT NULL,
+  CHECK (network IN ('bells-mainnet', 'bells-testnet')),
+  CHECK (species_id BETWEEN 1 AND 251),
+  CHECK (level BETWEEN 1 AND 100),
+  CHECK (shiny IN (0, 1)),
+  CHECK (party_slot_index BETWEEN 1 AND 6),
+  CHECK (iv_atk BETWEEN 0 AND 15),
+  CHECK (iv_def BETWEEN 0 AND 15),
+  CHECK (iv_spe BETWEEN 0 AND 15),
+  CHECK (iv_special BETWEEN 0 AND 15),
+  CHECK (iv_hp BETWEEN 0 AND 15)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pokemon_owner
+  ON pokemon(signed_in_wallet);
+CREATE INDEX IF NOT EXISTS idx_pokemon_species
+  ON pokemon(species_id);
+CREATE INDEX IF NOT EXISTS idx_pokemon_iv_total
+  ON pokemon(iv_total DESC);
+CREATE INDEX IF NOT EXISTS idx_pokemon_shiny
+  ON pokemon(shiny) WHERE shiny = 1;
+CREATE INDEX IF NOT EXISTS idx_pokemon_network
+  ON pokemon(network);
+
 -- Ingestion log (unchanged from v1).
 CREATE TABLE IF NOT EXISTS ingestion_log (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,

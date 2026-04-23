@@ -1,9 +1,13 @@
-// Capture + reveal JSON validator. Runs on the CF Worker, so it stays
-// dependency-free (standard Web APIs only: crypto.subtle, fetch, TextEncoder,
-// atob). Supports:
+// Capture + reveal + mint JSON validator. Runs on the CF Worker, so it stays
+// dependency-free for legacy paths (standard Web APIs only: crypto.subtle,
+// fetch, TextEncoder, atob). Supports:
 //   - schema 1.3 legacy (plaintext IVs inline, attestation v1.1)
 //   - schema 1.4 commit-reveal (IVs hidden, attestation v2 over commitments)
 //   - op:"reveal" inscriptions that open a prior capture's commitments
+//   - schema 1.5 (NEW) op:"capture_commit" + op:"mint" — see SCHEMA-v1.5.md.
+//     Reuses the canonical builders/validators from capture-core.mjs +
+//     gen2-species.mjs (synced into src/ at deploy time by indexer.yml) so
+//     there's exactly one source of truth for the v1.5 cryptographic checks.
 //
 // Stages (short-circuit on first failure): schema → provenance → attestation
 // recomputed → block hash existence on the claimed network.
@@ -344,9 +348,245 @@ export async function fetchAndValidateInscription(inscriptionId, network, env) {
   if (parsed?.op === "save-snapshot") {
     return { ok: true, kind: "save-snapshot", parsed, raw };
   }
+  if (parsed?.op === "capture_commit") {
+    const result = await validateCaptureCommitV1_5(parsed, env);
+    if (!result.ok) return result;
+    return { ok: true, kind: "capture_commit", parsed, raw, normalized: result.normalized };
+  }
+  if (parsed?.op === "mint") {
+    return { ok: true, kind: "mint", parsed, raw };
+  }
   const result = await validateCapture(parsed, env);
   if (!result.ok) return result;
   return { ok: true, kind: "capture", normalized: result.normalized, raw, parsed };
+}
+
+// =====================================================================
+// Schema v1.5 — capture_commit + mint
+// =====================================================================
+// Reuses the canonical builders/validators from the synced capture-core.mjs
+// + gen2-species.mjs. Adds indexer-side checks the client validators can't
+// run (DB unicity, electrs owner check post-mainnet).
+
+import {
+  validateCaptureCommitRecord,
+  validatePokemonMintRecord,
+  parsePartySlotFromSnapshot as parseSlotV1_5,
+  computeIvsCommitment as computeIvsCommitmentV1_5,
+  computeRamSnapshotHash as computeRamSnapshotHashV1_5,
+  deriveGbcHpIv as deriveGbcHpIvV1_5,
+  isGen2Shiny as isGen2ShinyV1_5,
+  WRAM_BYTE_LENGTH as WRAM_BYTE_LENGTH_V1_5,
+} from "./capture-core.mjs";
+import { getGen2SpeciesCatalog } from "./gen2-species.mjs";
+
+let _gen2Catalog = null;
+function gen2Catalog() {
+  if (!_gen2Catalog) _gen2Catalog = getGen2SpeciesCatalog();
+  return _gen2Catalog;
+}
+
+function gen2SpeciesResolver(internalSpeciesId) {
+  return gen2Catalog().byInternalId.get(internalSpeciesId) ?? null;
+}
+
+// Sprite resolver wired to the canonical p:pokebells-sprites manifest
+// (see tools/sprites-out-gen2/sprite-pack.manifest.template.json for shape:
+// `sprites[dexNo].normal_inscription_id` and `.shiny_inscription_id`).
+//
+// FAIL-CLOSED on mainnet:
+//   - SPRITE_PACK_MANIFEST_JSON_MAINNET unset → builder returns null → all
+//     mainnet mints reject with "canonical sprite … not found in resolver".
+//   - SPRITE_PACK_MANIFEST_JSON_TESTNET unset → builder returns null →
+//     validator falls back to "non-empty string" check (testnet tolerance).
+function spriteResolverFromEnv(env, network) {
+  const manifestKey = network === "bells-mainnet"
+    ? "SPRITE_PACK_MANIFEST_JSON_MAINNET"
+    : "SPRITE_PACK_MANIFEST_JSON_TESTNET";
+  const raw = env?.[manifestKey];
+  if (!raw) return null;
+  let manifest;
+  try { manifest = JSON.parse(raw); }
+  catch { return null; }
+  const base = network === "bells-mainnet"
+    ? String(env?.CONTENT_BASE_MAINNET ?? "")
+    : String(env?.CONTENT_BASE_TESTNET ?? "");
+  return (dexNo, shiny) => {
+    const entry = manifest.sprites?.[String(dexNo)];
+    if (!entry) return null;
+    const id = shiny ? entry.shiny_inscription_id : entry.normal_inscription_id;
+    if (!id || /^REPLACE_ME/.test(id)) return null;
+    return `${base}${id}`;
+  };
+}
+
+// Shape checks + recompute attestation. Mirrors capture-core's
+// validateCaptureCommitRecord (single source of truth).
+async function validateCaptureCommitV1_5(parsed, _env) {
+  const result = await validateCaptureCommitRecord(parsed);
+  if (!result.ok) {
+    return reject("schema", result.error ?? "capture_commit invalid");
+  }
+  return {
+    ok: true,
+    normalized: {
+      inscription_id: null, // filled by worker
+      network: parsed.capture_network,
+      signed_in_wallet: parsed.signed_in_wallet,
+      session_sequence_number: parsed.session_sequence_number,
+      block_hash_at_capture: String(parsed.block_hash_at_capture).toLowerCase(),
+      game_rom_sha256: String(parsed.game_rom_sha256).toLowerCase(),
+      party_slot_index: parsed.party_slot_index,
+      ivs_commitment: String(parsed.ivs_commitment).toLowerCase(),
+      ivs_commitment_scheme: parsed.ivs_commitment_scheme,
+      ram_snapshot_hash: String(parsed.ram_snapshot_hash).toLowerCase(),
+      ram_commitment_scheme: parsed.ram_commitment_scheme,
+      svbk_at_capture: parsed.svbk_at_capture,
+      attestation: String(parsed.attestation).toLowerCase(),
+      attestation_scheme: parsed.attestation_scheme,
+    },
+  };
+}
+
+// Validate a v1.5 mint against its commit row + extract the canonical
+// pokemon row for insertion. The commitRow shape matches the commits
+// table columns (see schema.sql).
+//
+// NOTE: indexer checks #11 (vout[0] owner === signed_in_wallet) and #12
+// (DB unique on ref_capture_commit) are enforced in the worker, not here:
+// #11 needs an electrs lookup keyed by mintInscriptionId, #12 is a DB
+// constraint that fires on insert.
+export async function validateMintV1_5(mintParsed, commitRow, env) {
+  if (!mintParsed || mintParsed.p !== "pokebells" || mintParsed.op !== "mint") {
+    return reject("schema", "mint must have p:pokebells op:mint");
+  }
+  if (!commitRow) {
+    return reject("reference", "capture_commit row not found — register the commit first");
+  }
+  // Re-shape commitRow into the canonical capture_commit body the
+  // shared validator expects.
+  const commitBody = {
+    p: "pokebells",
+    op: "capture_commit",
+    schema_version: "1.5",
+    signed_in_wallet: commitRow.signed_in_wallet,
+    session_sequence_number: commitRow.session_sequence_number,
+    capture_network: commitRow.network,
+    block_hash_at_capture: commitRow.block_hash_at_capture,
+    game_rom_sha256: commitRow.game_rom_sha256,
+    party_slot_index: commitRow.party_slot_index,
+    ivs_commitment: commitRow.ivs_commitment,
+    ivs_commitment_scheme: commitRow.ivs_commitment_scheme,
+    ram_snapshot_hash: commitRow.ram_snapshot_hash,
+    ram_commitment_scheme: commitRow.ram_commitment_scheme,
+    svbk_at_capture: commitRow.svbk_at_capture,
+    attestation: commitRow.attestation,
+    attestation_scheme: commitRow.attestation_scheme,
+  };
+
+  const speciesResolver = gen2SpeciesResolver;
+  const resolveSpriteImage = spriteResolverFromEnv(env, commitRow.network);
+
+  // FAIL-CLOSED on mainnet: without a sprite pack manifest the validator
+  // falls back to "non-empty string" for mint.image, letting an attacker
+  // publish any URL (swapping a shiny sprite onto a non-shiny capture,
+  // pointing at an unrelated inscription, etc.). Refuse to validate mints
+  // at all on mainnet until SPRITE_PACK_MANIFEST_JSON_MAINNET is bound.
+  if (commitRow.network === "bells-mainnet" && !resolveSpriteImage) {
+    return reject("config",
+      "mainnet sprite pack manifest is not configured (SPRITE_PACK_MANIFEST_JSON_MAINNET). " +
+      "Refusing to validate mints fail-open — every species would accept arbitrary image URLs.");
+  }
+
+  const check = await validatePokemonMintRecord(mintParsed, commitBody, {
+    speciesResolver,
+    resolveSpriteImage,
+  });
+  if (!check.ok) {
+    return reject("mint", check.error ?? "mint validation failed");
+  }
+
+  // Build the pokemon row from the validated mint. Mirrors mint body fields
+  // 1-for-1; nothing derived again — validatePokemonMintRecord already
+  // enforced consistency.
+  const ivs = mintParsed.ivs;
+  const ivSpecial = Number.isInteger(ivs.spd) ? ivs.spd : ivs.spc;
+  return {
+    ok: true,
+    normalized: {
+      mint_inscription_id: null, // filled by worker
+      ref_capture_commit: mintParsed.ref_capture_commit,
+      network: commitRow.network,
+      signed_in_wallet: mintParsed.signed_in_wallet,
+      party_slot_index: mintParsed.party_slot_index,
+      species_id: mintParsed.species_id,
+      species_name: mintParsed.species_name,
+      level: mintParsed.level,
+      shiny: mintParsed.shiny ? 1 : 0,
+      iv_atk: ivs.atk,
+      iv_def: ivs.def,
+      iv_spe: ivs.spe,
+      iv_special: ivSpecial,
+      iv_hp: mintParsed.derived_ivs.hp,
+      iv_total: ivs.atk + ivs.def + ivs.spe + ivSpecial,
+      ev_hp: mintParsed.evs?.hp ?? null,
+      ev_atk: mintParsed.evs?.atk ?? null,
+      ev_def: mintParsed.evs?.def ?? null,
+      ev_spe: mintParsed.evs?.spe ?? null,
+      ev_spc: mintParsed.evs?.spc ?? null,
+      status: mintParsed.status ?? null,
+      held_item: mintParsed.held_item ?? null,
+      friendship: mintParsed.friendship ?? null,
+      pokerus: mintParsed.pokerus ?? null,
+      catch_rate: mintParsed.catch_rate ?? null,
+      moves_json: JSON.stringify(mintParsed.moves ?? []),
+      pp_json: JSON.stringify(mintParsed.pp ?? []),
+      name: mintParsed.name,
+      description: mintParsed.description ?? null,
+      image: mintParsed.image,
+      attributes_json: JSON.stringify(mintParsed.attributes ?? []),
+    },
+  };
+}
+
+// Owner check (SCHEMA-v1.5.md check #11). Fetches the mint inscription's
+// reveal tx via electrs, reads vout[0].scriptpubkey_address, and compares
+// against mint.signed_in_wallet.
+//
+// FAIL-CLOSED policy:
+//   - bells-mainnet + no electrs URL configured → REJECT (anti-copy
+//     defense disabled means Bob can copy Alice's mint silently).
+//   - bells-testnet + no electrs URL → ALLOW with skipped:true (dev
+//     convenience; the indexer log records the skip).
+//
+// Mainnet wrangler.toml MUST set ELECTRS_BASE_MAINNET in [vars].
+export async function verifyMintOwner(mintInscriptionId, claimedWallet, env, network) {
+  const electrsBase = network === "bells-mainnet"
+    ? env?.ELECTRS_BASE_MAINNET
+    : env?.ELECTRS_BASE_TESTNET;
+  if (!electrsBase) {
+    if (network === "bells-mainnet") {
+      return reject("owner",
+        "mainnet owner check disabled (ELECTRS_BASE_MAINNET unset); refusing to fail-open on production network");
+    }
+    return { ok: true, skipped: true, reason: "electrs base unset (testnet)" };
+  }
+  const revealTxid = mintInscriptionId.replace(/i\d+$/i, "");
+  let resp;
+  try { resp = await fetch(`${electrsBase}/tx/${revealTxid}`, { cf: { cacheTtl: 60 } }); }
+  catch (e) { return reject("owner", `electrs fetch failed: ${e.message}`); }
+  if (!resp.ok) return reject("owner", `electrs returned ${resp.status} for tx ${revealTxid}`);
+  let tx;
+  try { tx = await resp.json(); }
+  catch (e) { return reject("owner", `electrs response not JSON: ${e.message}`); }
+  const firstOwner = tx?.vout?.[0]?.scriptpubkey_address;
+  if (typeof firstOwner !== "string" || !firstOwner) {
+    return reject("owner", "electrs vout[0].scriptpubkey_address missing");
+  }
+  if (firstOwner !== claimedWallet) {
+    return reject("owner", `vout[0] owner ${firstOwner} does not match mint.signed_in_wallet ${claimedWallet}`);
+  }
+  return { ok: true };
 }
 
 // Validate an op:"save-snapshot" inscription. Does NOT validate signature

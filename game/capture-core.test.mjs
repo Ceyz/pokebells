@@ -4,31 +4,44 @@ import assert from 'node:assert/strict';
 import {
   ATTESTATION_SCHEME,
   ATTESTATION_SCHEME_V2,
+  ATTESTATION_SCHEME_V2_1,
+  CAPTURE_COMMIT_OP_V1_5,
   CAPTURE_SCHEMA_VERSION,
   GEN2_UNSUPPORTED_LABEL,
   IVS_COMMITMENT_SCHEME,
+  MINT_OP_V1_5,
   PARTY_OFFSETS,
+  POKEBELLS_COLLECTION_NAME,
   RAM_ADDRS,
+  RAM_COMMITMENT_SCHEME_V1,
+  RAM_WITNESS_SCHEME_FULL_V1,
   SAVE_SNAPSHOT_SCHEME,
+  SCHEMA_VERSION_V1_5,
   SRAM_TOTAL_BYTE_LENGTH,
   SVBK_REGISTER,
   WRAM_BANK0_BYTE_LENGTH,
   WRAM_BYTE_LENGTH,
+  buildCaptureCommitRecord,
   buildCaptureProvenance,
   buildCapturedPokemonRecord,
+  buildPokemonMintRecord,
   buildRevealRecord,
   buildSaveSnapshotRecord,
   buildSpriteImageResolver,
   catchChancePercent,
+  computeCaptureAttestationV2_1,
   computeCatchChance,
   computeIvsCommitment,
   deriveGbcHpIv,
   isGen2Shiny,
   parseGbcDvs,
+  parsePartySlotFromSnapshot,
   readRamSnapshot,
   readSramSnapshot,
   statusNameFromByte,
+  validateCaptureCommitRecord,
   validateCapturedPokemonRecord,
+  validatePokemonMintRecord,
   validateRevealRecord,
   validateSaveSnapshotRecord,
   writeSramSnapshot,
@@ -601,4 +614,630 @@ test('buildCapturedPokemonRecord wires nft_metadata.image from resolver (always 
     resolveSpriteImage() { throw new Error('resolver blew up'); },
   });
   assert.equal(tolerantRecord.nft_metadata.image, null);
+});
+
+// ============================================================================
+// SCHEMA v1.5 — capture_commit + mint
+// ============================================================================
+
+// Deterministic sprite resolver for the v1.5 tests. The validator's strict
+// image check requires a resolver match, so every test passes this same stub
+// to both buildPokemonMintRecord and validatePokemonMintRecord.
+const v15SpriteResolver = (dex, shiny) => `/content/sprite_${dex}${shiny ? '_s' : ''}i0`;
+
+async function makeValidV15(options = {}) {
+  const catalog = loadCatalog();
+  const speciesEntry = getSpeciesByDexNo(catalog, options.dexNo ?? 25);
+  const level = options.level ?? 17;
+  const { memory, slotIndex, slotBase } = buildMemoryForSpecies(speciesEntry, level);
+  if (options.mutateMemory) options.mutateMemory(memory, slotIndex);
+  const readByte = (address) => memory[address];
+
+  const atkDefDv = memory[slotBase + PARTY_OFFSETS.attackDefenseDv];
+  const spdSpcDv = memory[slotBase + PARTY_OFFSETS.speedSpecialDv];
+  const ivs = parseGbcDvs(atkDefDv, spdSpcDv);
+
+  const built = await buildCaptureCommitRecord(readByte, {
+    network: 'bells-testnet',
+    signedInWallet: 'tb1ptestwallet000000000000000000000000000000',
+    sessionSequenceNumber: 1,
+    blockHashAtCapture: 'a'.repeat(64),
+    partySlotIndex: slotIndex,
+    ivs,
+    ivsSaltBytes: TEST_SALT_BYTES,
+    romSha256: 'b'.repeat(64),
+  });
+  return { catalog, speciesEntry, slotIndex, slotBase, readByte, ivs, ...built };
+}
+
+test('v1.5 computeCaptureAttestationV2_1 is deterministic + slot-sensitive', async () => {
+  const args = {
+    blockHashAtCapture: 'a'.repeat(64),
+    ramSnapshotHashHex: 'b'.repeat(64),
+    svbk: 1,
+    signedInWallet: 'tb1ptest',
+    sessionSequenceNumber: 1,
+    ivsCommitmentHex: 'c'.repeat(64),
+    partySlotIndex: 2,
+  };
+  const h1 = await computeCaptureAttestationV2_1(args);
+  const h2 = await computeCaptureAttestationV2_1(args);
+  assert.equal(h1, h2, 'must be deterministic');
+  assert.equal(h1.length, 64, '64-char hex');
+  // Changing slot must change the hash (cryptographic pinning of slot)
+  const hSlot3 = await computeCaptureAttestationV2_1({ ...args, partySlotIndex: 3 });
+  assert.notEqual(h1, hSlot3, 'slot tampering must change attestation');
+});
+
+test('v1.5 parsePartySlotFromSnapshot extracts species/level/DVs correctly', () => {
+  const catalog = loadCatalog();
+  const cyndaquil = getSpeciesByDexNo(catalog, 155);
+  const { memory, slotIndex } = buildMemoryForSpecies(cyndaquil, 5);
+  const snapshot = new Uint8Array(WRAM_BYTE_LENGTH);
+  for (let a = 0xc000; a < 0xe000; a += 1) {
+    snapshot[a - 0xc000] = memory[a];
+  }
+  const slot = parsePartySlotFromSnapshot(snapshot, slotIndex);
+  assert.equal(slot.internalSpeciesId, cyndaquil.dexNo);
+  assert.equal(slot.level, 5);
+  assert.deepEqual(slot.dvs, { atk: 10, def: 11, spe: 12, spd: 13 });
+  assert.equal(slot.heldItem, 0);
+  assert.equal(slot.friendship, 70);
+  assert.deepEqual(slot.moves, [33, 34, 35, 36]);
+});
+
+test('v1.5 parsePartySlotFromSnapshot rejects bad inputs', () => {
+  const snap = new Uint8Array(WRAM_BYTE_LENGTH);
+  assert.throws(() => parsePartySlotFromSnapshot(snap, 0), /1\.\.6/);
+  assert.throws(() => parsePartySlotFromSnapshot(snap, 7), /1\.\.6/);
+  assert.throws(() => parsePartySlotFromSnapshot(snap, 1.5), /1\.\.6/);
+  assert.throws(() => parsePartySlotFromSnapshot(new Uint8Array(100), 1), /8192/);
+  assert.throws(() => parsePartySlotFromSnapshot([], 1), /Uint8Array/);
+});
+
+test('v1.5 buildCaptureCommitRecord emits a clean opaque receipt', async () => {
+  const { commitRecord, privateReveal } = await makeValidV15();
+  assert.equal(commitRecord.p, 'pokebells');
+  assert.equal(commitRecord.op, CAPTURE_COMMIT_OP_V1_5);
+  assert.equal(commitRecord.schema_version, SCHEMA_VERSION_V1_5);
+  assert.equal(commitRecord.attestation_scheme, ATTESTATION_SCHEME_V2_1);
+  assert.equal(commitRecord.ram_commitment_scheme, RAM_COMMITMENT_SCHEME_V1);
+  assert.equal(commitRecord.ivs_commitment_scheme, IVS_COMMITMENT_SCHEME);
+  assert.equal(commitRecord.party_slot_index, 2);
+  assert.equal(commitRecord.svbk_at_capture, 1);
+  assert.match(commitRecord.attestation, /^[0-9a-f]{64}$/);
+  assert.match(commitRecord.ivs_commitment, /^[0-9a-f]{64}$/);
+  assert.match(commitRecord.ram_snapshot_hash, /^[0-9a-f]{64}$/);
+  assert.equal(commitRecord.game_rom_sha256, 'b'.repeat(64));
+
+  // Marketplace pollution check: NO species / level / nft_metadata / image / attributes
+  assert.equal(commitRecord.species_id, undefined, 'no species in commit');
+  assert.equal(commitRecord.level, undefined, 'no level in commit');
+  assert.equal(commitRecord.name, undefined, 'no name in commit');
+  assert.equal(commitRecord.image, undefined, 'no image in commit');
+  assert.equal(commitRecord.attributes, undefined, 'no attributes in commit');
+  assert.equal(commitRecord.nft_metadata, undefined, 'no nft_metadata in commit');
+
+  // privateReveal cache
+  assert.equal(privateReveal.ivs_salt_hex.length, 64);
+  assert.equal(privateReveal.ram_snapshot_base64.length > 0, true);
+  assert.deepEqual(privateReveal.ivs, { atk: 10, def: 11, spe: 12, spd: 13 });
+});
+
+test('v1.5 buildPokemonMintRecord builds a marketplace-ready NFT', async () => {
+  const { catalog, commitRecord, privateReveal } = await makeValidV15({ dexNo: 155, level: 5 });
+  const captureInscriptionId = `${'d'.repeat(64)}i0`;
+
+  const mint = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: captureInscriptionId,
+    privateReveal,
+    speciesResolver: (id) => catalog.byInternalId.get(id) ?? null,
+    resolveSpriteImage: (dexNo, shiny) => `/content/sprite_${dexNo}${shiny ? '_s' : ''}i0`,
+    now: '2026-04-23T10:00:00.000Z',
+  });
+
+  assert.equal(mint.p, 'pokebells');
+  assert.equal(mint.op, MINT_OP_V1_5);
+  assert.equal(mint.schema_version, SCHEMA_VERSION_V1_5);
+  assert.equal(mint.ref_capture_commit, captureInscriptionId);
+  assert.equal(mint.party_slot_index, 2);
+  assert.equal(mint.signed_in_wallet, commitRecord.signed_in_wallet);
+
+  // Pokemon traits derived from RAM
+  assert.equal(mint.species_id, 155);
+  assert.equal(mint.species_name, 'Cyndaquil');
+  assert.equal(mint.level, 5);
+  assert.equal(mint.shiny, false);
+  assert.deepEqual(mint.ivs, { atk: 10, def: 11, spe: 12, spd: 13 });
+  assert.equal(mint.derived_ivs.hp, 5);
+
+  // Top-level marketplace metadata
+  assert.equal(mint.name, 'Cyndaquil Lv.5');
+  assert.equal(mint.image, '/content/sprite_155i0');
+  assert.ok(Array.isArray(mint.attributes), 'attributes is array');
+  const traitMap = Object.fromEntries(mint.attributes.map((t) => [t.trait_type, t.value]));
+  assert.equal(traitMap.Pokemon, 'Cyndaquil');
+  assert.equal(traitMap['Dex No'], 155);
+  assert.equal(traitMap.Level, 5);
+  assert.equal(traitMap.Shiny, 'No');
+  assert.equal(traitMap['IV Total'], 46);
+  assert.equal(traitMap['IV HP'], 5);
+  assert.equal(traitMap['IV Attack'], 10);
+  assert.equal(traitMap.Collection, POKEBELLS_COLLECTION_NAME);
+
+  // No nested nft_metadata mirror — top-level IS the metadata
+  assert.equal(mint.nft_metadata, undefined);
+
+  // Reveal preimages present (anti-cheat verifier needs them)
+  assert.equal(mint.ivs_salt_hex.length, 64);
+  assert.equal(mint.ram_snapshot_encoding, 'base64');
+  assert.equal(mint.ram_witness_scheme, RAM_WITNESS_SCHEME_FULL_V1);
+});
+
+test('v1.5 validateCaptureCommitRecord accepts valid + rejects schema breaks', async () => {
+  const { commitRecord } = await makeValidV15();
+  const ok = await validateCaptureCommitRecord(commitRecord);
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+
+  const badOp = await validateCaptureCommitRecord({ ...commitRecord, op: 'capture' });
+  assert.equal(badOp.ok, false);
+  assert.match(badOp.errors.join(' | '), /op must equal "capture_commit"/);
+
+  const badSchema = await validateCaptureCommitRecord({ ...commitRecord, schema_version: '1.4' });
+  assert.equal(badSchema.ok, false);
+  assert.match(badSchema.errors.join(' | '), /schema_version must equal "1.5"/);
+
+  const badSlot = await validateCaptureCommitRecord({ ...commitRecord, party_slot_index: 7 });
+  assert.equal(badSlot.ok, false);
+  assert.match(badSlot.errors.join(' | '), /party_slot_index/);
+
+  const badSvbk = await validateCaptureCommitRecord({ ...commitRecord, svbk_at_capture: 2 });
+  assert.equal(badSvbk.ok, false);
+  assert.match(badSvbk.errors.join(' | '), /svbk_at_capture must equal 1/);
+
+  const badAttScheme = await validateCaptureCommitRecord({
+    ...commitRecord, attestation_scheme: 'sha256:...:v2',
+  });
+  assert.equal(badAttScheme.ok, false);
+  assert.match(badAttScheme.errors.join(' | '), /attestation_scheme/);
+});
+
+test('v1.5 validateCaptureCommitRecord rejects tampered attestation', async () => {
+  const { commitRecord } = await makeValidV15();
+
+  // Tamper a field that's part of attestation preimage
+  const tamperedSlot = { ...commitRecord, party_slot_index: 3 };
+  const r1 = await validateCaptureCommitRecord(tamperedSlot);
+  assert.equal(r1.ok, false);
+  assert.match(r1.errors.join(' | '), /attestation does not match/);
+
+  const tamperedWallet = { ...commitRecord, signed_in_wallet: 'tb1pevil' };
+  const r2 = await validateCaptureCommitRecord(tamperedWallet);
+  assert.equal(r2.ok, false);
+  assert.match(r2.errors.join(' | '), /attestation does not match/);
+
+  const tamperedCommitment = { ...commitRecord, ivs_commitment: 'f'.repeat(64) };
+  const r3 = await validateCaptureCommitRecord(tamperedCommitment);
+  assert.equal(r3.ok, false);
+  assert.match(r3.errors.join(' | '), /attestation does not match/);
+});
+
+test('v1.5 validatePokemonMintRecord accepts a valid commit+mint pair', async () => {
+  const { catalog, commitRecord, privateReveal } = await makeValidV15();
+  const mint = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal,
+    speciesResolver: (id) => catalog.byInternalId.get(id) ?? null,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+  const result = await validatePokemonMintRecord(mint, commitRecord, {
+    speciesResolver: (id) => catalog.byInternalId.get(id) ?? null,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+});
+
+test('v1.5 validatePokemonMintRecord rejects all flavors of tampering', async () => {
+  const { catalog, commitRecord, privateReveal } = await makeValidV15();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+  const validMint = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal,
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+
+  const badSlot = clone(validMint);
+  badSlot.party_slot_index = 3;
+  const r1 = await validatePokemonMintRecord(badSlot, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r1.ok, false);
+  assert.match(r1.errors.join(' | '), /party_slot_index .* does not match commit/);
+
+  const badWallet = clone(validMint);
+  badWallet.signed_in_wallet = 'tb1pevil';
+  const r2 = await validatePokemonMintRecord(badWallet, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r2.ok, false);
+  assert.match(r2.errors.join(' | '), /signed_in_wallet does not match commit/);
+
+  const badIvs = clone(validMint);
+  badIvs.ivs = { atk: 0, def: 0, spe: 0, spd: 0 };
+  const r3 = await validatePokemonMintRecord(badIvs, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r3.ok, false);
+  assert.match(r3.errors.join(' | '), /ivs_commitment preimage does not match/);
+
+  const badSpecies = clone(validMint);
+  badSpecies.species_id = 1;
+  const r4 = await validatePokemonMintRecord(badSpecies, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r4.ok, false);
+  assert.match(r4.errors.join(' | '), /species_id .* does not match RAM slot/);
+
+  const badLevel = clone(validMint);
+  badLevel.level = 99;
+  const r5 = await validatePokemonMintRecord(badLevel, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r5.ok, false);
+  assert.match(r5.errors.join(' | '), /level .* does not match RAM slot/);
+
+  const badShiny = clone(validMint);
+  badShiny.shiny = true;
+  const r6 = await validatePokemonMintRecord(badShiny, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r6.ok, false);
+  assert.match(r6.errors.join(' | '), /shiny .* does not match RAM-derived/);
+
+  const badWitness = clone(validMint);
+  badWitness.ram_witness_scheme = 'merkle:v1';
+  const r7 = await validatePokemonMintRecord(badWitness, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r7.ok, false);
+  assert.match(r7.errors.join(' | '), /ram_witness_scheme/);
+});
+
+test('v1.5 validatePokemonMintRecord rejects truncated / corrupted RAM snapshot', async () => {
+  const { catalog, commitRecord, privateReveal } = await makeValidV15();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+  const validMint = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal,
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+
+  const truncated = clone(validMint);
+  truncated.ram_snapshot = privateReveal.ram_snapshot_base64.slice(0, 100);
+  const r1 = await validatePokemonMintRecord(truncated, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r1.ok, false);
+  assert.match(r1.errors.join(' | '), /ram_snapshot must decode to 8192/);
+
+  // Modify one byte in decoded snapshot → re-encode → hash mismatch
+  const decoded = Buffer.from(privateReveal.ram_snapshot_base64, 'base64');
+  decoded[0] ^= 0xff;
+  const corrupted = clone(validMint);
+  corrupted.ram_snapshot = decoded.toString('base64');
+  const r2 = await validatePokemonMintRecord(corrupted, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r2.ok, false);
+  assert.match(r2.errors.join(' | '), /ram_snapshot does not match commit hash/);
+});
+
+test('v1.5 buildCaptureCommitRecord requires romSha256 (forbids null)', async () => {
+  const catalog = loadCatalog();
+  const cyndaquil = getSpeciesByDexNo(catalog, 155);
+  const { memory, slotIndex } = buildMemoryForSpecies(cyndaquil, 5);
+  const readByte = (a) => memory[a];
+  await assert.rejects(
+    buildCaptureCommitRecord(readByte, {
+      network: 'bells-testnet',
+      signedInWallet: 'tb1ptest',
+      sessionSequenceNumber: 1,
+      blockHashAtCapture: 'a'.repeat(64),
+      partySlotIndex: slotIndex,
+      ivsSaltBytes: TEST_SALT_BYTES,
+      // no romSha256
+    }),
+    /romSha256 must be 64-char hex/,
+  );
+});
+
+test('v1.5 buildCaptureCommitRecord derives IVs from RAM slot (ignores options.ivs)', async () => {
+  const catalog = loadCatalog();
+  const cyndaquil = getSpeciesByDexNo(catalog, 155);
+  const { memory, slotIndex, slotBase } = buildMemoryForSpecies(cyndaquil, 5);
+  const readByte = (a) => memory[a];
+
+  // RAM has atkDef=0xAB → ATK=10, DEF=11; spdSpc=0xCD → SPE=12, SPD=13
+  const realDvs = parseGbcDvs(
+    memory[slotBase + PARTY_OFFSETS.attackDefenseDv],
+    memory[slotBase + PARTY_OFFSETS.speedSpecialDv],
+  );
+  assert.deepEqual(realDvs, { atk: 10, def: 11, spe: 12, spd: 13 });
+
+  // Try to pass fake IVs — builder must ignore them.
+  const { commitRecord, privateReveal } = await buildCaptureCommitRecord(readByte, {
+    network: 'bells-testnet',
+    signedInWallet: 'tb1ptest',
+    sessionSequenceNumber: 1,
+    blockHashAtCapture: 'a'.repeat(64),
+    partySlotIndex: slotIndex,
+    ivsSaltBytes: TEST_SALT_BYTES,
+    romSha256: 'b'.repeat(64),
+    ivs: { atk: 15, def: 15, spe: 15, spd: 15 }, // caller-supplied LIE
+  });
+
+  // The privateReveal.ivs must be the RAM-derived real DVs, not the lie.
+  assert.deepEqual(privateReveal.ivs, realDvs);
+
+  // The commitment must match the REAL DVs + salt, not the lie + salt.
+  const expectedCommitment = await computeIvsCommitment(realDvs, TEST_SALT_BYTES);
+  assert.equal(commitRecord.ivs_commitment, expectedCommitment);
+});
+
+test('v1.5 validateCaptureCommitRecord rejects missing/invalid game_rom_sha256', async () => {
+  const { commitRecord } = await makeValidV15();
+  const noRom = { ...commitRecord, game_rom_sha256: null };
+  const r1 = await validateCaptureCommitRecord(noRom);
+  assert.equal(r1.ok, false);
+  assert.match(r1.errors.join(' | '), /game_rom_sha256/);
+
+  const badRom = { ...commitRecord, game_rom_sha256: 'not-hex' };
+  const r2 = await validateCaptureCommitRecord(badRom);
+  assert.equal(r2.ok, false);
+  assert.match(r2.errors.join(' | '), /game_rom_sha256/);
+});
+
+test('v1.5 validatePokemonMintRecord catches ivs forged against fake commitment', async () => {
+  // Attack scenario GPT described: construct commit manually with
+  // ivs_commitment hashing FAKE perfect IVs. Build mint with those fake
+  // IVs + matching salt + real RAM snapshot. Current v1.5 check must
+  // reject because mint.ivs !== slot.dvs.
+  const catalog = loadCatalog();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+  const { commitRecord, privateReveal, slotIndex } = await makeValidV15();
+
+  const fakeIvs = { atk: 15, def: 15, spe: 15, spd: 15 };
+  const fakeSalt = new Uint8Array(32).fill(0x77);
+  const fakeCommitment = await computeIvsCommitment(fakeIvs, fakeSalt);
+
+  // Replace commit's ivs_commitment with the fake. In a real attack the
+  // commit inscription would have this fake value.
+  const tamperedCommit = {
+    ...commitRecord,
+    ivs_commitment: fakeCommitment,
+  };
+  // Re-attestation so the commit itself still validates (the attacker
+  // would build a commit with consistent attestation over the fake
+  // commitment).
+  tamperedCommit.attestation = await computeCaptureAttestationV2_1({
+    blockHashAtCapture: tamperedCommit.block_hash_at_capture,
+    ramSnapshotHashHex: tamperedCommit.ram_snapshot_hash,
+    svbk: tamperedCommit.svbk_at_capture,
+    signedInWallet: tamperedCommit.signed_in_wallet,
+    sessionSequenceNumber: tamperedCommit.session_sequence_number,
+    ivsCommitmentHex: fakeCommitment,
+    partySlotIndex: tamperedCommit.party_slot_index,
+  });
+
+  // Attacker-constructed mint: publishes fake IVs matching the fake
+  // commitment, but keeps the real RAM snapshot (so ram_snapshot_hash
+  // still matches). Everything else copied from a legit mint.
+  const legitMint = buildPokemonMintRecord({
+    commitRecord: tamperedCommit,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal: { ...privateReveal, ivs_salt_hex: bytesToHexFix(fakeSalt) },
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+  const attackMint = {
+    ...legitMint,
+    ivs: fakeIvs,
+    ivs_salt_hex: bytesToHexFix(fakeSalt),
+    derived_ivs: { hp: deriveGbcHpIv(fakeIvs) },
+    shiny: isGen2Shiny(fakeIvs),
+  };
+
+  // Validator must reject because slot.dvs !== fakeIvs (slot has
+  // 10/11/12/13, attack claims 15/15/15/15).
+  const result = await validatePokemonMintRecord(attackMint, tamperedCommit, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join(' | '), /mint\.ivs does not match the DVs in the RAM slot/);
+});
+
+test('v1.5 validatePokemonMintRecord catches lies about moves/held_item/friendship/status', async () => {
+  const { catalog, commitRecord, privateReveal } = await makeValidV15();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+  const valid = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal,
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+
+  const badMoves = clone(valid);
+  badMoves.moves = [99, 99, 99, 99];
+  const r1 = await validatePokemonMintRecord(badMoves, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r1.ok, false);
+  assert.match(r1.errors.join(' | '), /mint\.moves does not match/);
+
+  const badPp = clone(valid);
+  badPp.pp = [10, 10, 10, 10];
+  const r2 = await validatePokemonMintRecord(badPp, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r2.ok, false);
+  assert.match(r2.errors.join(' | '), /mint\.pp does not match/);
+
+  const badHeld = clone(valid);
+  badHeld.held_item = 99;
+  const r3 = await validatePokemonMintRecord(badHeld, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r3.ok, false);
+  assert.match(r3.errors.join(' | '), /held_item/);
+
+  const badFriend = clone(valid);
+  badFriend.friendship = 255;
+  const r4 = await validatePokemonMintRecord(badFriend, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r4.ok, false);
+  assert.match(r4.errors.join(' | '), /friendship/);
+
+  const badPokerus = clone(valid);
+  badPokerus.pokerus = 1;
+  const r5 = await validatePokemonMintRecord(badPokerus, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r5.ok, false);
+  assert.match(r5.errors.join(' | '), /pokerus/);
+
+  const badStatus = clone(valid);
+  badStatus.status = 'Burned';
+  const r6 = await validatePokemonMintRecord(badStatus, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r6.ok, false);
+  assert.match(r6.errors.join(' | '), /status/);
+
+  const badHpIv = clone(valid);
+  badHpIv.derived_ivs = { hp: 15 }; // real is 5
+  const r7 = await validatePokemonMintRecord(badHpIv, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r7.ok, false);
+  assert.match(r7.errors.join(' | '), /derived_ivs\.hp/);
+
+  const badName = clone(valid);
+  badName.species_name = 'Mewtwo';
+  const r8 = await validatePokemonMintRecord(badName, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r8.ok, false);
+  assert.match(r8.errors.join(' | '), /species_name/);
+
+  const badEvs = clone(valid);
+  badEvs.evs = { hp: 9999, atk: 9999, def: 9999, spe: 9999, spc: 9999 };
+  const r9 = await validatePokemonMintRecord(badEvs, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r9.ok, false);
+  assert.match(r9.errors.join(' | '), /mint\.evs\./);
+
+  const badCatch = clone(valid);
+  badCatch.catch_rate = 255;
+  const r10 = await validatePokemonMintRecord(badCatch, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(r10.ok, false);
+  assert.match(r10.errors.join(' | '), /catch_rate/);
+});
+
+// Small inline helper for the test above — bytesToHex is internal to the
+// module and not re-exported as `bytesToHex`. Mirror the canonical
+// encoding the salt uses in privateReveal.
+function bytesToHexFix(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+test('v1.5 validatePokemonMintRecord rejects lies about name / image / attributes', async () => {
+  const { catalog, commitRecord, privateReveal } = await makeValidV15();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+  const valid = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal,
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+  const opts = { speciesResolver, resolveSpriteImage: v15SpriteResolver };
+
+  // Name ment
+  const badName = clone(valid);
+  badName.name = 'Mewtwo Legendary';
+  const r1 = await validatePokemonMintRecord(badName, commitRecord, opts);
+  assert.equal(r1.ok, false);
+  assert.match(r1.errors.join(' | '), /mint\.name .* must equal/);
+
+  // Image ment (pointe une sprite shiny alors que Pokémon non-shiny)
+  const badImage = clone(valid);
+  badImage.image = '/content/sprite_150_si0'; // Mewtwo shiny
+  const r2 = await validatePokemonMintRecord(badImage, commitRecord, opts);
+  assert.equal(r2.ok, false);
+  assert.match(r2.errors.join(' | '), /mint\.image .* must equal canonical/);
+
+  // Attributes ment sur l'IV Attack → marketplace afficherait 15 au lieu de 10
+  const badAttrIv = clone(valid);
+  badAttrIv.attributes = valid.attributes.map((a) =>
+    a.trait_type === 'IV Attack' ? { trait_type: 'IV Attack', value: 15 } : a,
+  );
+  const r3 = await validatePokemonMintRecord(badAttrIv, commitRecord, opts);
+  assert.equal(r3.ok, false);
+  assert.match(r3.errors.join(' | '), /mint\.attributes\[7\] mismatch/);
+
+  // Attributes ment sur le nom du species
+  const badAttrName = clone(valid);
+  badAttrName.attributes = valid.attributes.map((a) =>
+    a.trait_type === 'Pokemon' ? { trait_type: 'Pokemon', value: 'Mewtwo' } : a,
+  );
+  const r4 = await validatePokemonMintRecord(badAttrName, commitRecord, opts);
+  assert.equal(r4.ok, false);
+  assert.match(r4.errors.join(' | '), /mint\.attributes\[1\] mismatch/);
+
+  // Attributes ajoute une entrée parasite (longueur différente)
+  const badAttrExtra = clone(valid);
+  badAttrExtra.attributes = [...valid.attributes, { trait_type: 'Rarity', value: 'Legendary' }];
+  const r5 = await validatePokemonMintRecord(badAttrExtra, commitRecord, opts);
+  assert.equal(r5.ok, false);
+  assert.match(r5.errors.join(' | '), /attributes length/);
+
+  // Attributes retire une entrée
+  const badAttrMissing = clone(valid);
+  badAttrMissing.attributes = valid.attributes.slice(0, -1);
+  const r6 = await validatePokemonMintRecord(badAttrMissing, commitRecord, opts);
+  assert.equal(r6.ok, false);
+  assert.match(r6.errors.join(' | '), /attributes length/);
+
+  // derived_ivs manquant
+  const noDerived = clone(valid);
+  delete noDerived.derived_ivs;
+  const r7 = await validatePokemonMintRecord(noDerived, commitRecord, opts);
+  assert.equal(r7.ok, false);
+  assert.match(r7.errors.join(' | '), /derived_ivs must be an object/);
+
+  // evs manquant
+  const noEvs = clone(valid);
+  delete noEvs.evs;
+  const r8 = await validatePokemonMintRecord(noEvs, commitRecord, opts);
+  assert.equal(r8.ok, false);
+  assert.match(r8.errors.join(' | '), /evs must be an object/);
+});
+
+test('v1.5 validatePokemonMintRecord rejects when sprite resolver returns null', async () => {
+  // Mainnet hardening: a missing sprite mapping must NOT silently fall back
+  // to "any image string". Without this, an attacker-friendly indexer that
+  // didn't bind the sprite manifest would accept arbitrary image URLs.
+  const { catalog, commitRecord, privateReveal } = await makeValidV15();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+  const valid = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId: `${'d'.repeat(64)}i0`,
+    privateReveal,
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+  const result = await validatePokemonMintRecord(valid, commitRecord, {
+    speciesResolver,
+    resolveSpriteImage: () => null, // simulates missing sprite mapping
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join(' | '), /canonical sprite for species .* not found in resolver/);
+});
+
+test('v1.5 end-to-end: commit + mint round-trip validates fully', async () => {
+  const catalog = loadCatalog();
+  const speciesResolver = (id) => catalog.byInternalId.get(id) ?? null;
+
+  const { commitRecord, privateReveal } = await makeValidV15({ dexNo: 197, level: 24 }); // Umbreon
+
+  const commitValidation = await validateCaptureCommitRecord(commitRecord);
+  assert.equal(commitValidation.ok, true, JSON.stringify(commitValidation.errors));
+
+  const commitInscriptionId = `${'e'.repeat(64)}i0`;
+  const mint = buildPokemonMintRecord({
+    commitRecord,
+    commitInscriptionId,
+    privateReveal,
+    speciesResolver,
+    resolveSpriteImage: v15SpriteResolver,
+  });
+
+  const mintValidation = await validatePokemonMintRecord(mint, commitRecord, { speciesResolver, resolveSpriteImage: v15SpriteResolver });
+  assert.equal(mintValidation.ok, true, JSON.stringify(mintValidation.errors));
+
+  assert.equal(mint.species_id, 197);
+  assert.equal(mint.species_name, 'Umbreon');
+  assert.equal(mint.level, 24);
+  assert.equal(mint.signed_in_wallet, commitRecord.signed_in_wallet);
 });

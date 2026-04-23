@@ -6,6 +6,11 @@ on:
     branches: [main]
     paths:
       - "game/indexer/**"
+      # The indexer reuses the canonical capture-core + gen2-species at
+      # deploy time (synced into src/ by the workflow). A change to either
+      # MUST trigger an indexer redeploy so validators stay in lock-step.
+      - "game/capture-core.mjs"
+      - "game/gen2-species.mjs"
       - ".github/workflows/indexer.yml"
 
 permissions:
@@ -32,6 +37,16 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Sync v1.5 shared modules into indexer
+        # The indexer reuses capture-core's v1.5 builders + validators
+        # to avoid drifting two implementations. gen2-species ships the
+        # 251-entry catalog the validator needs for species/catch_rate
+        # cross-checks.
+        working-directory: .
+        run: |
+          cp game/capture-core.mjs game/indexer/src/capture-core.mjs
+          cp game/gen2-species.mjs game/indexer/src/gen2-species.mjs
 
       - name: Check syntax
         run: npm run check

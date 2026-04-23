@@ -49,11 +49,32 @@ export const ATTESTATION_SCHEME_V2 =
   'sha256:block_hash+ram_snapshot_hash+svbk+signed_wallet+session_sequence+ivs_commitment:v2';
 export const IVS_COMMITMENT_SCHEME = 'sha256:canonical(ivs)+salt_32b:v1';
 
-// Default scheme exported as ATTESTATION_SCHEME for code that references
-// "the current one". All NEW captures emit v2 under schema 1.4; the older
-// v1.1 constant is retained so legacy records validate.
-export const ATTESTATION_SCHEME = ATTESTATION_SCHEME_V2;
+// v2.1 attestation (schema 1.5): adds party_slot_index to pin which of the
+// six party slots was captured. Without it, a minter could later choose any
+// slot from the same RAM snapshot. The slot is exposed as a top-level field
+// in the capture_commit AND folded into the attestation hash so tampering is
+// cryptographically detectable. See SCHEMA-v1.5.md for the canonical
+// preimage encoding.
+export const ATTESTATION_SCHEME_V2_1 =
+  'sha256:block_hash+ram_snapshot_hash+svbk+signed_wallet+session_sequence+ivs_commitment+party_slot_index:v2.1';
 
+// v1.5 schema constants. The two-inscription protocol stays (capture_commit
+// receipt + mint NFT) but ops are renamed for marketplace cleanliness:
+//   capture (v1.4) -> capture_commit (v1.5) — opaque receipt, hors collection
+//   reveal  (v1.4) -> mint            (v1.5) — canonical NFT, marketplace-ready
+export const CAPTURE_COMMIT_OP_V1_5 = 'capture_commit';
+export const MINT_OP_V1_5 = 'mint';
+export const SCHEMA_VERSION_V1_5 = '1.5';
+export const RAM_COMMITMENT_SCHEME_V1 = 'sha256:wram8k:v1';
+export const RAM_WITNESS_SCHEME_FULL_V1 = 'full_wram8k:v1';
+
+// Default scheme exported as ATTESTATION_SCHEME for code that references
+// "the current one". All NEW captures emit v2.1 under schema 1.5; v2 + v1.1
+// constants are retained so legacy records validate.
+export const ATTESTATION_SCHEME = ATTESTATION_SCHEME_V2_1;
+
+// Legacy v1.4 schema constants (kept for the deprecated v1.4 builders below
+// + indexer legacy reads). New code uses SCHEMA_VERSION_V1_5.
 export const CAPTURE_SCHEMA_VERSION = '1.4';
 export const REVEAL_SCHEMA_VERSION = '1.4';
 
@@ -497,8 +518,34 @@ export async function computeCaptureAttestationV2({
   ]);
 }
 
-// Default exported name resolves to the current (v2) path.
-export const computeCaptureAttestation = computeCaptureAttestationV2;
+// v2.1 attestation (schema 1.5): identical to v2 plus a trailing
+// party_slot_index byte. See SCHEMA-v1.5.md "Attestation v2.1 — canonical
+// encoding". Pinning the slot prevents a minter from swapping which of the
+// six party slots the mint references after the commit is on-chain.
+export async function computeCaptureAttestationV2_1({
+  blockHashAtCapture,
+  ramSnapshotHashHex,
+  svbk,
+  signedInWallet,
+  sessionSequenceNumber,
+  ivsCommitmentHex,
+  partySlotIndex,
+}) {
+  const svbkByte = new Uint8Array([Number(svbk ?? 0) & 0xff]);
+  const slotByte = new Uint8Array([Number(partySlotIndex ?? 0) & 0xff]);
+  return sha256Hex([
+    String(blockHashAtCapture ?? '').trim().toLowerCase(),
+    String(ramSnapshotHashHex ?? '').trim().toLowerCase(),
+    svbkByte,
+    String(signedInWallet ?? ''),
+    String(sessionSequenceNumber ?? ''),
+    String(ivsCommitmentHex ?? '').trim().toLowerCase(),
+    slotByte,
+  ]);
+}
+
+// Default exported name resolves to the current (v2.1) path.
+export const computeCaptureAttestation = computeCaptureAttestationV2_1;
 
 // Canonical JSON for IV commitment is a deterministic ordering - atk, def,
 // spe, spd (not spc alias) - so every client + the indexer compute the
@@ -1429,11 +1476,635 @@ export async function validateCapturedPokemonRecord(record, options = {}) {
   };
 }
 
+// ============================================================================
+// SCHEMA v1.5 — capture_commit + mint
+// ============================================================================
+// See SCHEMA-v1.5.md at the repo root for the full spec. Coexists with the
+// v1.4 builders above during the migration window. shell.js + companion +
+// indexer migrate to these v1.5 builders in subsequent commits.
+
+function hexToBytesV15(hex) {
+  const clean = String(hex ?? '').trim().toLowerCase();
+  if (!/^[0-9a-f]*$/.test(clean) || clean.length % 2 !== 0) {
+    throw new Error('hex must be even-length [0-9a-f]');
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+// Parse one Crystal party slot directly out of an 8 KB WRAM bank0+bank1
+// snapshot buffer. Used both by buildPokemonMintRecord (to derive species /
+// level / DVs / EVs from the on-chain RAM) and validatePokemonMintRecord
+// (to cross-check the mint's claimed traits against the snapshot).
+//
+// snapshot layout (matches readRamSnapshot output):
+//   [0x0000..0x1000) = bank 0 (0xC000..0xCFFF)
+//   [0x1000..0x2000) = bank 1 (0xD000..0xDFFF, SVBK forced to 1)
+// Party slot N (1..6) lives at absolute address
+// RAM_ADDRS.teamSlotBase + (N-1) * 48, which is in bank 1 → snapshot offset
+// (slotAbsBase - WRAM_BANK0_START).
+export function parsePartySlotFromSnapshot(snapshotBytes, slotIndex) {
+  if (!(snapshotBytes instanceof Uint8Array)) {
+    throw new Error('snapshotBytes must be Uint8Array');
+  }
+  if (snapshotBytes.byteLength !== WRAM_BYTE_LENGTH) {
+    throw new Error(`snapshot must be ${WRAM_BYTE_LENGTH} bytes (got ${snapshotBytes.byteLength})`);
+  }
+  if (!Number.isInteger(slotIndex) || slotIndex < 1 || slotIndex > 6) {
+    throw new Error(`party_slot_index must be integer 1..6 (got ${slotIndex})`);
+  }
+  const slotAbsBase = RAM_ADDRS.teamSlotBase + (slotIndex - 1) * RAM_ADDRS.teamSlotSize;
+  const slotOffset = slotAbsBase - WRAM_BANK0_START;
+  if (slotOffset < 0 || slotOffset + RAM_ADDRS.teamSlotSize > snapshotBytes.byteLength) {
+    throw new Error(`slot ${slotIndex} would exit snapshot bounds (offset ${slotOffset})`);
+  }
+  const at = (off) => snapshotBytes[slotOffset + off] & 0xff;
+  const wordAt = (off) => ((snapshotBytes[slotOffset + off] & 0xff) << 8)
+                          | (snapshotBytes[slotOffset + off + 1] & 0xff);
+  const tripleAt = (off) => ((snapshotBytes[slotOffset + off] & 0xff) << 16)
+                            | ((snapshotBytes[slotOffset + off + 1] & 0xff) << 8)
+                            | (snapshotBytes[slotOffset + off + 2] & 0xff);
+
+  const internalSpeciesId = at(PARTY_OFFSETS.species);
+  const heldItem = at(PARTY_OFFSETS.heldItem);
+  const moves = [
+    at(PARTY_OFFSETS.moves),
+    at(PARTY_OFFSETS.moves + 1),
+    at(PARTY_OFFSETS.moves + 2),
+    at(PARTY_OFFSETS.moves + 3),
+  ];
+  const pp = [
+    at(PARTY_OFFSETS.pp) & 0x3f,
+    at(PARTY_OFFSETS.pp + 1) & 0x3f,
+    at(PARTY_OFFSETS.pp + 2) & 0x3f,
+    at(PARTY_OFFSETS.pp + 3) & 0x3f,
+  ];
+  const friendship = at(PARTY_OFFSETS.happiness);
+  const pokerus = at(PARTY_OFFSETS.pokerus);
+  const level = at(PARTY_OFFSETS.level);
+  const statusByte = at(PARTY_OFFSETS.status);
+  const atkDefDv = at(PARTY_OFFSETS.attackDefenseDv);
+  const spdSpcDv = at(PARTY_OFFSETS.speedSpecialDv);
+  const dvs = parseGbcDvs(atkDefDv, spdSpcDv);
+  const evs = {
+    hp: wordAt(PARTY_OFFSETS.hpExp),
+    atk: wordAt(PARTY_OFFSETS.atkExp),
+    def: wordAt(PARTY_OFFSETS.defExp),
+    spe: wordAt(PARTY_OFFSETS.speExp),
+    spc: wordAt(PARTY_OFFSETS.spcExp),
+  };
+
+  return {
+    internalSpeciesId,
+    heldItem,
+    moves,
+    pp,
+    friendship,
+    pokerus,
+    level,
+    statusByte,
+    atkDefDv,
+    spdSpcDv,
+    dvs,
+    evs,
+    caughtData: ((at(PARTY_OFFSETS.caughtData) & 0xff) << 8) | (at(PARTY_OFFSETS.caughtData + 1) & 0xff),
+    originalTrainerId: wordAt(PARTY_OFFSETS.originalTrainerId),
+    experience: tripleAt(PARTY_OFFSETS.experience),
+  };
+}
+
+// Build a v1.5 capture_commit record + accompanying privateReveal cache.
+//
+// The commit body is the receipt that gets inscribed on-chain. IVs are
+// DERIVED FROM THE RAM SNAPSHOT at the given partySlotIndex — the caller
+// does NOT supply them as input. This is critical: the commit's
+// ivs_commitment would otherwise be decorrelated from the party slot's
+// real DVs, letting a malicious minter claim any IVs that match the
+// commitment regardless of what the RAM actually contains. Locking
+// ivs = slot.dvs at commit time + validatePokemonMintRecord re-checking
+// mint.ivs == slot.dvs makes the two bindings inseparable.
+//
+// The privateReveal cache carries the salt + base64 snapshot so the
+// caller (shell + companion) can later build the matching op:"mint"
+// record deterministically. Persist to IndexedDB keyed by attestation.
+export async function buildCaptureCommitRecord(readByte, options = {}) {
+  const captureNetwork = normalizeNetworkKey(options.network);
+  const sessionSequenceNumber = options.sessionSequenceNumber;
+  const partySlotIndex = options.partySlotIndex;
+  const signedInWallet = options.signedInWallet ?? '';
+  const romSha256 = options.romSha256 ?? null;
+
+  if (!Number.isInteger(sessionSequenceNumber) || sessionSequenceNumber < 1) {
+    throw new Error('sessionSequenceNumber must be a positive integer');
+  }
+  if (!Number.isInteger(partySlotIndex) || partySlotIndex < 1 || partySlotIndex > 6) {
+    throw new Error('partySlotIndex must be integer 1..6');
+  }
+  if (typeof signedInWallet !== 'string' || !signedInWallet.trim()) {
+    throw new Error('signedInWallet required');
+  }
+  if (typeof romSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(romSha256)) {
+    throw new Error('romSha256 must be 64-char hex');
+  }
+
+  const saltBytes = options.ivsSaltBytes ?? generateIvSaltBytes();
+  if (!(saltBytes instanceof Uint8Array) || saltBytes.byteLength !== 32) {
+    throw new Error('ivsSaltBytes must be a 32-byte Uint8Array');
+  }
+
+  let ramSnapshotBytes;
+  let svbkAtCapture;
+  if (options.ramSnapshotBytes) {
+    ramSnapshotBytes = options.ramSnapshotBytes;
+    svbkAtCapture = Number.isInteger(options.svbk) ? options.svbk & 0xff : 0x01;
+  } else {
+    const snapshot = readRamSnapshot(readByte, {
+      ...(options.ramWindow ?? {}),
+      writeByte: options.writeByte ?? null,
+    });
+    ramSnapshotBytes = snapshot.bytes;
+    svbkAtCapture = snapshot.svbk;
+  }
+
+  // Derive IVs + EVs canonically from the party slot in the freshly-read
+  // snapshot. options.ivs is intentionally ignored — the RAM is the only
+  // source of truth for party state. If an attacker controls the client
+  // enough to fake RAM bytes, they already control the whole ROM runtime,
+  // which the game_rom_sha256 check at mainnet will surface separately.
+  const slot = parsePartySlotFromSnapshot(ramSnapshotBytes, partySlotIndex);
+  const ivs = slot.dvs;
+
+  const ivsCommitmentHex = await computeIvsCommitment(ivs, saltBytes);
+  const ramSnapshotHashHex = await computeRamSnapshotHash(ramSnapshotBytes);
+
+  const blockHashAtCapture = (options.blockHashAtCapture ?? await fetchBlockTipHash({
+    network: captureNetwork,
+    fetchImpl: options.fetchImpl,
+  })).toLowerCase();
+
+  const attestationHex = await computeCaptureAttestationV2_1({
+    blockHashAtCapture,
+    ramSnapshotHashHex,
+    svbk: svbkAtCapture,
+    signedInWallet,
+    sessionSequenceNumber,
+    ivsCommitmentHex,
+    partySlotIndex,
+  });
+
+  const commitRecord = {
+    p: 'pokebells',
+    op: CAPTURE_COMMIT_OP_V1_5,
+    schema_version: SCHEMA_VERSION_V1_5,
+    signed_in_wallet: signedInWallet,
+    session_sequence_number: sessionSequenceNumber,
+    capture_network: captureNetwork,
+    block_hash_at_capture: blockHashAtCapture,
+    game_rom_sha256: romSha256.toLowerCase(),
+    party_slot_index: partySlotIndex,
+    ivs_commitment: ivsCommitmentHex,
+    ivs_commitment_scheme: IVS_COMMITMENT_SCHEME,
+    ram_snapshot_hash: ramSnapshotHashHex,
+    ram_commitment_scheme: RAM_COMMITMENT_SCHEME_V1,
+    svbk_at_capture: svbkAtCapture,
+    attestation: attestationHex,
+    attestation_scheme: ATTESTATION_SCHEME_V2_1,
+  };
+
+  // privateReveal carries JUST the salt + raw snapshot. ivs is redundantly
+  // cached for UI display convenience; verifiers re-derive from the snapshot.
+  const privateReveal = {
+    ivs,
+    evs: slot.evs,
+    ivs_salt_hex: bytesToHex(saltBytes),
+    ram_snapshot_base64: encodeBase64(ramSnapshotBytes),
+  };
+
+  return { commitRecord, privateReveal };
+}
+
+// Build a v1.5 op:"mint" record. Pairs with a previously-inscribed
+// capture_commit. EVERY Pokemon trait is derived deterministically from
+// the RAM snapshot at commitRecord.party_slot_index + the species catalog
+// — the privateReveal input contributes only the salt (external to RAM).
+// This lets any verifier reproduce the exact same mint body given just
+// (commit, ram_snapshot, salt, catalog), which is what
+// validatePokemonMintRecord relies on to catch a malicious minter claiming
+// fake IVs / moves / items / etc.
+export function buildPokemonMintRecord({
+  commitRecord,
+  commitInscriptionId,
+  privateReveal,
+  speciesResolver = null,
+  resolveSpriteImage = null,
+  now = new Date().toISOString(),
+}) {
+  if (!commitRecord || commitRecord.op !== CAPTURE_COMMIT_OP_V1_5) {
+    throw new Error('buildPokemonMintRecord requires a v1.5 capture_commit record');
+  }
+  if (!/^[0-9a-f]{64}i\d+$/i.test(String(commitInscriptionId ?? ''))) {
+    throw new Error('commitInscriptionId must look like <64hex>i<N>');
+  }
+  if (!privateReveal?.ivs_salt_hex || !privateReveal.ram_snapshot_base64) {
+    throw new Error('privateReveal { ivs_salt_hex, ram_snapshot_base64 } required');
+  }
+
+  const ramSnapshot = decodeBase64(privateReveal.ram_snapshot_base64);
+  if (ramSnapshot.byteLength !== WRAM_BYTE_LENGTH) {
+    throw new Error(`ram_snapshot must decode to ${WRAM_BYTE_LENGTH} bytes`);
+  }
+  const slot = parsePartySlotFromSnapshot(ramSnapshot, commitRecord.party_slot_index);
+
+  const speciesInfo = typeof speciesResolver === 'function'
+    ? speciesResolver(slot.internalSpeciesId)
+    : null;
+  const dexNo = speciesInfo?.dexNo ?? slot.internalSpeciesId;
+  const speciesName = speciesInfo?.name ?? `Species ${dexNo}`;
+
+  // Canonical: IVs + EVs come from the slot, never from the caller. Any
+  // mismatch between slot.dvs and the commit's ivs_commitment preimage is
+  // caught at mint-validation time (check #6 + the new check
+  // mint.ivs === slot.dvs).
+  const ivs = slot.dvs;
+  const derivedIvs = { hp: deriveGbcHpIv(ivs) };
+  const shiny = isGen2Shiny(ivs);
+  const ivSpecial = ivs.spd;
+  const ivTotal = ivs.atk + ivs.def + ivs.spe + ivSpecial;
+  const evs = slot.evs;
+
+  const status = statusNameFromByte(slot.statusByte);
+  const image = resolveSpriteImageUrl(resolveSpriteImage, dexNo, shiny);
+
+  const attributes = [
+    { trait_type: 'Collection', value: POKEBELLS_COLLECTION_NAME },
+    { trait_type: 'Pokemon', value: speciesName },
+    { trait_type: 'Dex No', value: dexNo },
+    { trait_type: 'Level', value: slot.level },
+    { trait_type: 'Shiny', value: shiny ? 'Yes' : 'No' },
+    { trait_type: 'IV Total', value: ivTotal },
+    { trait_type: 'IV HP', value: derivedIvs.hp },
+    { trait_type: 'IV Attack', value: ivs.atk },
+    { trait_type: 'IV Defense', value: ivs.def },
+    { trait_type: 'IV Speed', value: ivs.spe },
+    { trait_type: 'IV Special', value: ivSpecial },
+    { trait_type: 'Status', value: status },
+    { trait_type: 'Friendship', value: slot.friendship },
+    { trait_type: 'Held Item', value: slot.heldItem === 0 ? 'None' : `ITEM_${slot.heldItem}` },
+  ];
+
+  return {
+    p: 'pokebells',
+    op: MINT_OP_V1_5,
+    schema_version: SCHEMA_VERSION_V1_5,
+    ref_capture_commit: commitInscriptionId,
+    party_slot_index: commitRecord.party_slot_index,
+    signed_in_wallet: commitRecord.signed_in_wallet,
+
+    species_id: dexNo,
+    species_name: speciesName,
+    level: slot.level,
+    moves: slot.moves,
+    pp: slot.pp,
+    held_item: slot.heldItem,
+    friendship: slot.friendship,
+    pokerus: slot.pokerus,
+    status,
+    catch_rate: speciesInfo?.catchRate ?? null,
+
+    ivs,
+    ivs_salt_hex: privateReveal.ivs_salt_hex,
+    derived_ivs: derivedIvs,
+    evs,
+    shiny,
+
+    ram_snapshot: privateReveal.ram_snapshot_base64,
+    ram_snapshot_encoding: 'base64',
+    ram_witness_scheme: RAM_WITNESS_SCHEME_FULL_V1,
+
+    name: `${speciesName} Lv.${slot.level}`,
+    description: `${speciesName} captured in Pokemon Crystal via PokeBells.`,
+    image,
+    attributes,
+
+    minted_at: now,
+  };
+}
+
+// Validate a v1.5 capture_commit record standalone (no cross-inscription
+// access required). Indexer + companion call this before posting to the chain
+// or registering with the indexer. Returns { ok, errors, error }.
+export async function validateCaptureCommitRecord(record) {
+  const errors = [];
+  if (!record || typeof record !== 'object') {
+    return { ok: false, errors: ['record must be an object'], error: 'record must be an object' };
+  }
+  if (record.p !== 'pokebells') errors.push('p must equal "pokebells"');
+  if (record.op !== CAPTURE_COMMIT_OP_V1_5) errors.push('op must equal "capture_commit"');
+  if (record.schema_version !== SCHEMA_VERSION_V1_5) errors.push('schema_version must equal "1.5"');
+
+  if (!Number.isInteger(record.party_slot_index)
+      || record.party_slot_index < 1 || record.party_slot_index > 6) {
+    errors.push('party_slot_index must be integer 1..6');
+  }
+  if (!BLOCK_HASH_HEX_RE.test(String(record.ivs_commitment ?? ''))) {
+    errors.push('ivs_commitment must be 64-char hex');
+  }
+  if (record.ivs_commitment_scheme !== IVS_COMMITMENT_SCHEME) {
+    errors.push(`ivs_commitment_scheme must equal "${IVS_COMMITMENT_SCHEME}"`);
+  }
+  if (!BLOCK_HASH_HEX_RE.test(String(record.ram_snapshot_hash ?? ''))) {
+    errors.push('ram_snapshot_hash must be 64-char hex');
+  }
+  if (record.ram_commitment_scheme !== RAM_COMMITMENT_SCHEME_V1) {
+    errors.push(`ram_commitment_scheme must equal "${RAM_COMMITMENT_SCHEME_V1}"`);
+  }
+  if (!BLOCK_HASH_HEX_RE.test(String(record.block_hash_at_capture ?? ''))) {
+    errors.push('block_hash_at_capture must be 64-char hex');
+  }
+  if (!BLOCK_HASH_HEX_RE.test(String(record.game_rom_sha256 ?? ''))) {
+    errors.push('game_rom_sha256 must be 64-char hex');
+  }
+  if (record.svbk_at_capture !== 1) {
+    errors.push('svbk_at_capture must equal 1 in v2.1');
+  }
+  if (typeof record.signed_in_wallet !== 'string' || !record.signed_in_wallet.trim()) {
+    errors.push('signed_in_wallet required');
+  }
+  if (!Number.isInteger(record.session_sequence_number) || record.session_sequence_number < 1) {
+    errors.push('session_sequence_number must be positive integer');
+  }
+  if (record.capture_network !== 'bells-mainnet' && record.capture_network !== 'bells-testnet') {
+    errors.push('capture_network must be bells-mainnet or bells-testnet');
+  }
+  if (record.attestation_scheme !== ATTESTATION_SCHEME_V2_1) {
+    errors.push(`attestation_scheme must equal "${ATTESTATION_SCHEME_V2_1}"`);
+  }
+  if (!BLOCK_HASH_HEX_RE.test(String(record.attestation ?? ''))) {
+    errors.push('attestation must be 64-char hex');
+  }
+
+  if (errors.length === 0) {
+    const recomputed = await computeCaptureAttestationV2_1({
+      blockHashAtCapture: record.block_hash_at_capture,
+      ramSnapshotHashHex: record.ram_snapshot_hash,
+      svbk: record.svbk_at_capture,
+      signedInWallet: record.signed_in_wallet,
+      sessionSequenceNumber: record.session_sequence_number,
+      ivsCommitmentHex: record.ivs_commitment,
+      partySlotIndex: record.party_slot_index,
+    });
+    if (recomputed !== String(record.attestation).toLowerCase()) {
+      errors.push('attestation does not match recomputed v2.1 value');
+    }
+  }
+
+  return { ok: errors.length === 0, errors, error: errors[0] ?? null };
+}
+
+// Validate a v1.5 op:"mint" record against its capture_commit. Runs all the
+// cross-inscription consistency checks the indexer needs except for #11
+// (vout[0] owner match — electrs-side, indexer-only) and #12 (DB unique on
+// ref_capture_commit — also indexer-only).
+//
+// options.speciesResolver: (internalSpeciesId) => { dexNo, name, catchRate, ... }
+//   Required to verify mint.species_id matches what the RAM slot encodes.
+export async function validatePokemonMintRecord(mintRecord, commitRecord, options = {}) {
+  const errors = [];
+  if (!mintRecord || mintRecord.p !== 'pokebells' || mintRecord.op !== MINT_OP_V1_5) {
+    errors.push('mint must have p:pokebells op:mint');
+    return { ok: false, errors, error: errors[0] };
+  }
+  if (mintRecord.schema_version !== SCHEMA_VERSION_V1_5) {
+    errors.push('mint schema_version must equal "1.5"');
+  }
+  if (!commitRecord || commitRecord.op !== CAPTURE_COMMIT_OP_V1_5) {
+    errors.push('matching capture_commit record required');
+    return { ok: false, errors, error: errors[0] };
+  }
+
+  if (mintRecord.party_slot_index !== commitRecord.party_slot_index) {
+    errors.push(`party_slot_index ${mintRecord.party_slot_index} does not match commit (${commitRecord.party_slot_index})`);
+  }
+  if (mintRecord.signed_in_wallet !== commitRecord.signed_in_wallet) {
+    errors.push('signed_in_wallet does not match commit');
+  }
+  if (mintRecord.ram_witness_scheme !== RAM_WITNESS_SCHEME_FULL_V1) {
+    errors.push(`ram_witness_scheme must equal "${RAM_WITNESS_SCHEME_FULL_V1}" in v1.5`);
+  }
+  if ((mintRecord.ram_snapshot_encoding ?? 'base64') !== 'base64') {
+    errors.push('ram_snapshot_encoding must equal "base64"');
+  }
+
+  // ivs_commitment preimage check
+  const ivs = mintRecord.ivs ?? {};
+  for (const key of ['atk', 'def', 'spe']) {
+    if (!Number.isInteger(ivs[key]) || ivs[key] < 0 || ivs[key] > 15) {
+      errors.push(`mint.ivs.${key} must be integer 0..15`);
+    }
+  }
+  const specialIv = Number.isInteger(ivs.spd) ? ivs.spd : ivs.spc;
+  if (!Number.isInteger(specialIv) || specialIv < 0 || specialIv > 15) {
+    errors.push('mint.ivs.spd (or spc) must be integer 0..15');
+  }
+  const saltHex = String(mintRecord.ivs_salt_hex ?? '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(saltHex)) {
+    errors.push('ivs_salt_hex must be 64-char hex');
+  } else if (errors.length === 0) {
+    const saltBytes = hexToBytesV15(saltHex);
+    const expectedCommitment = await computeIvsCommitment(ivs, saltBytes);
+    if (expectedCommitment !== String(commitRecord.ivs_commitment ?? '').toLowerCase()) {
+      errors.push('ivs_commitment preimage does not match commit');
+    }
+  }
+
+  // ram_snapshot preimage check + full slot cross-check. Every
+  // marketplace-visible trait must be derivable from the snapshot +
+  // catalog; any divergence = rejection. Catches a malicious minter that
+  // inscribes RAM matching the hash but claims fake traits (IVs, moves,
+  // items, status, EVs, etc.) in the top-level / attributes.
+  let snapshotBytes;
+  try {
+    snapshotBytes = decodeBase64(mintRecord.ram_snapshot ?? '');
+  } catch (e) {
+    errors.push(`ram_snapshot base64 decode failed: ${e.message}`);
+  }
+  if (snapshotBytes) {
+    if (snapshotBytes.byteLength !== WRAM_BYTE_LENGTH) {
+      errors.push(`ram_snapshot must decode to ${WRAM_BYTE_LENGTH} bytes`);
+    } else {
+      const ramHash = await computeRamSnapshotHash(snapshotBytes);
+      if (ramHash !== String(commitRecord.ram_snapshot_hash ?? '').toLowerCase()) {
+        errors.push('ram_snapshot does not match commit hash');
+      } else {
+        try {
+          const slot = parsePartySlotFromSnapshot(snapshotBytes, commitRecord.party_slot_index);
+
+          // IVs MUST match the DVs encoded in the slot. Without this check,
+          // a minter could set ivs_commitment to any value, reveal any (ivs,
+          // salt) that hashes to it, and publish fake ivs unrelated to the
+          // Pokemon in the RAM.
+          const slotIvs = slot.dvs;
+          if (ivs.atk !== slotIvs.atk || ivs.def !== slotIvs.def
+              || ivs.spe !== slotIvs.spe || specialIv !== slotIvs.spd) {
+            errors.push('mint.ivs does not match the DVs in the RAM slot');
+          }
+
+          // HP IV is derived deterministically from the four DVs. v1.5 requires
+          // derived_ivs present as an object so marketplaces don't see undefined.
+          const expectedHpIv = deriveGbcHpIv(slotIvs);
+          if (!mintRecord.derived_ivs || typeof mintRecord.derived_ivs !== 'object') {
+            errors.push('mint.derived_ivs must be an object');
+          } else if (mintRecord.derived_ivs.hp !== expectedHpIv) {
+            errors.push(`derived_ivs.hp ${mintRecord.derived_ivs.hp} must equal ${expectedHpIv}`);
+          }
+
+          const speciesResolver = options.speciesResolver;
+          const speciesInfo = typeof speciesResolver === 'function'
+            ? speciesResolver(slot.internalSpeciesId) : null;
+          const expectedDexNo = speciesInfo?.dexNo ?? slot.internalSpeciesId;
+          if (mintRecord.species_id !== expectedDexNo) {
+            errors.push(`mint.species_id ${mintRecord.species_id} does not match RAM slot (${expectedDexNo})`);
+          }
+          if (speciesInfo && typeof mintRecord.species_name === 'string'
+              && mintRecord.species_name !== speciesInfo.name) {
+            errors.push(`mint.species_name "${mintRecord.species_name}" does not match catalog ("${speciesInfo.name}")`);
+          }
+          if (mintRecord.level !== slot.level) {
+            errors.push(`mint.level ${mintRecord.level} does not match RAM slot (${slot.level})`);
+          }
+          const expectedShiny = isGen2Shiny(slotIvs);
+          if (Boolean(mintRecord.shiny) !== expectedShiny) {
+            errors.push(`mint.shiny ${mintRecord.shiny} does not match RAM-derived (${expectedShiny})`);
+          }
+
+          // Moves, PP, held item, friendship, pokerus, status = full RAM
+          // projection. Catalog-derived catch_rate too.
+          if (!Array.isArray(mintRecord.moves) || mintRecord.moves.length !== 4
+              || !mintRecord.moves.every((m, i) => m === slot.moves[i])) {
+            errors.push('mint.moves does not match RAM slot');
+          }
+          if (!Array.isArray(mintRecord.pp) || mintRecord.pp.length !== 4
+              || !mintRecord.pp.every((p, i) => p === slot.pp[i])) {
+            errors.push('mint.pp does not match RAM slot');
+          }
+          if (mintRecord.held_item !== slot.heldItem) {
+            errors.push(`mint.held_item ${mintRecord.held_item} does not match RAM slot (${slot.heldItem})`);
+          }
+          if (mintRecord.friendship !== slot.friendship) {
+            errors.push(`mint.friendship ${mintRecord.friendship} does not match RAM slot (${slot.friendship})`);
+          }
+          if (mintRecord.pokerus !== slot.pokerus) {
+            errors.push(`mint.pokerus ${mintRecord.pokerus} does not match RAM slot (${slot.pokerus})`);
+          }
+          const expectedStatus = statusNameFromByte(slot.statusByte);
+          if (mintRecord.status !== expectedStatus) {
+            errors.push(`mint.status "${mintRecord.status}" does not match RAM-derived ("${expectedStatus}")`);
+          }
+          // v1.5: mint.evs MUST be a complete object with all 5 keys matching
+          // the slot. No "if present" leniency — marketplaces must see
+          // consistent EVs or the mint is rejected entirely.
+          if (!mintRecord.evs || typeof mintRecord.evs !== 'object') {
+            errors.push('mint.evs must be an object');
+          } else {
+            for (const key of ['hp', 'atk', 'def', 'spe', 'spc']) {
+              if (mintRecord.evs[key] !== slot.evs[key]) {
+                errors.push(`mint.evs.${key} ${mintRecord.evs[key]} does not match RAM slot (${slot.evs[key]})`);
+              }
+            }
+          }
+          if (speciesInfo && mintRecord.catch_rate != null
+              && mintRecord.catch_rate !== speciesInfo.catchRate) {
+            errors.push(`mint.catch_rate ${mintRecord.catch_rate} does not match catalog (${speciesInfo.catchRate})`);
+          }
+
+          // ===== Marketplace projection: name / image / attributes =====
+          // These fields are what wallets and marketplaces render to users.
+          // Letting them lie would let an attacker publish a Cyndaquil that
+          // shows up as "Mewtwo Lv.100 SHINY" with custom IV traits in
+          // listings. We pin them strictly to the canonical projection of
+          // the RAM slot + catalog so the mint's UX surface is always
+          // honest.
+          const speciesNameFinal = speciesInfo?.name ?? `Species ${expectedDexNo}`;
+          const expectedName = `${speciesNameFinal} Lv.${slot.level}`;
+          if (mintRecord.name !== expectedName) {
+            errors.push(`mint.name "${mintRecord.name}" must equal "${expectedName}"`);
+          }
+
+          // image canonical resolution. Mainnet indexer MUST pass a resolver
+          // backed by the pinned p:pokebells-sprites manifest. If the
+          // resolver is provided but returns null (sprite missing for this
+          // species/shiny pair), the mint is rejected: the collection
+          // requires a canonical image for every entry. Without a resolver
+          // (unit-test path) the validator enforces only "non-empty string"
+          // — never accept that fallback in production.
+          if (typeof options.resolveSpriteImage === 'function') {
+            const expectedImage = options.resolveSpriteImage(expectedDexNo, expectedShiny);
+            if (typeof expectedImage !== 'string' || !expectedImage) {
+              errors.push(`canonical sprite for species ${expectedDexNo} (shiny=${expectedShiny}) not found in resolver — mint cannot be validated; check the sprite pack manifest`);
+            } else if (mintRecord.image !== expectedImage) {
+              errors.push(`mint.image "${mintRecord.image}" must equal canonical "${expectedImage}"`);
+            }
+          } else if (typeof mintRecord.image !== 'string' || !mintRecord.image) {
+            errors.push('mint.image must be a non-empty string');
+          }
+
+          // attributes[] = strict canonical ordered array. Same shape as
+          // buildPokemonMintRecord emits.
+          const ivTotalExpected = slotIvs.atk + slotIvs.def + slotIvs.spe + slotIvs.spd;
+          const expectedAttributes = [
+            { trait_type: 'Collection', value: POKEBELLS_COLLECTION_NAME },
+            { trait_type: 'Pokemon', value: speciesNameFinal },
+            { trait_type: 'Dex No', value: expectedDexNo },
+            { trait_type: 'Level', value: slot.level },
+            { trait_type: 'Shiny', value: expectedShiny ? 'Yes' : 'No' },
+            { trait_type: 'IV Total', value: ivTotalExpected },
+            { trait_type: 'IV HP', value: expectedHpIv },
+            { trait_type: 'IV Attack', value: slotIvs.atk },
+            { trait_type: 'IV Defense', value: slotIvs.def },
+            { trait_type: 'IV Speed', value: slotIvs.spe },
+            { trait_type: 'IV Special', value: slotIvs.spd },
+            { trait_type: 'Status', value: expectedStatus },
+            { trait_type: 'Friendship', value: slot.friendship },
+            { trait_type: 'Held Item', value: slot.heldItem === 0 ? 'None' : `ITEM_${slot.heldItem}` },
+          ];
+          if (!Array.isArray(mintRecord.attributes)) {
+            errors.push('mint.attributes must be an array');
+          } else if (mintRecord.attributes.length !== expectedAttributes.length) {
+            errors.push(`mint.attributes length ${mintRecord.attributes.length} must equal canonical ${expectedAttributes.length}`);
+          } else {
+            for (let i = 0; i < expectedAttributes.length; i += 1) {
+              const exp = expectedAttributes[i];
+              const got = mintRecord.attributes[i];
+              if (!got || got.trait_type !== exp.trait_type || got.value !== exp.value) {
+                errors.push(`mint.attributes[${i}] mismatch: expected {${exp.trait_type}: ${JSON.stringify(exp.value)}} got ${JSON.stringify(got)}`);
+                break; // one mismatch is enough — caller fixes and re-validates
+              }
+            }
+          }
+        } catch (e) {
+          errors.push(`slot parse failed: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  return { ok: errors.length === 0, errors, error: errors[0] ?? null };
+}
+
 const browserExports = {
   ATTESTATION_SCHEME,
   ATTESTATION_SCHEME_V1,
   ATTESTATION_SCHEME_V1_1,
   ATTESTATION_SCHEME_V2,
+  ATTESTATION_SCHEME_V2_1,
+  CAPTURE_COMMIT_OP_V1_5,
+  MINT_OP_V1_5,
+  SCHEMA_VERSION_V1_5,
+  RAM_COMMITMENT_SCHEME_V1,
+  RAM_WITNESS_SCHEME_FULL_V1,
   CAPTURE_SCHEMA_VERSION,
   IVS_COMMITMENT_SCHEME,
   REVEAL_SCHEMA_VERSION,
@@ -1457,9 +2128,11 @@ const browserExports = {
   SRAM_TOTAL_BYTE_LENGTH,
   SRAM_BANK_BYTE_LENGTH,
   SAVE_SNAPSHOT_SCHEME,
+  buildCaptureCommitRecord,
   buildCaptureProvenance,
   buildCapturedPokemonRecord,
   buildEvolveRecord,
+  buildPokemonMintRecord,
   buildRevealRecord,
   buildSaveSnapshotRecord,
   buildUpdateRecord,
@@ -1470,6 +2143,7 @@ const browserExports = {
   computeCaptureAttestation,
   computeCaptureAttestationV1_1,
   computeCaptureAttestationV2,
+  computeCaptureAttestationV2_1,
   computeCatchChance,
   computeIvsCommitment,
   computeRamSnapshotHash,
@@ -1484,6 +2158,7 @@ const browserExports = {
   normalizeSpeciesId,
   parseGbcDvs,
   parseGen1Dvs,
+  parsePartySlotFromSnapshot,
   readRamSnapshot,
   readTripleByte,
   readWord,
@@ -1492,7 +2167,9 @@ const browserExports = {
   statusBonusFor,
   statusNameFromByte,
   readSramSnapshot,
+  validateCaptureCommitRecord,
   validateCapturedPokemonRecord,
+  validatePokemonMintRecord,
   validateRevealRecord,
   validateSaveSnapshotRecord,
   writeSramSnapshot,

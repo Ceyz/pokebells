@@ -293,6 +293,122 @@ export async function latestSaveByWallet(env, wallet, romSha, network) {
   return row ?? null;
 }
 
+// =====================================================================
+// Schema v1.5 — commits + pokemon
+// =====================================================================
+
+export async function insertCommit(env, inscriptionId, normalized, rawJson) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(`
+    INSERT INTO commits (
+      inscription_id, network, signed_in_wallet, session_sequence_number,
+      block_hash_at_capture, game_rom_sha256, party_slot_index,
+      ivs_commitment, ivs_commitment_scheme,
+      ram_snapshot_hash, ram_commitment_scheme, svbk_at_capture,
+      attestation, attestation_scheme,
+      raw_commit_json, registered_at, valid
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+  `).bind(
+    inscriptionId,
+    normalized.network,
+    normalized.signed_in_wallet,
+    normalized.session_sequence_number,
+    normalized.block_hash_at_capture,
+    normalized.game_rom_sha256,
+    normalized.party_slot_index,
+    normalized.ivs_commitment,
+    normalized.ivs_commitment_scheme,
+    normalized.ram_snapshot_hash,
+    normalized.ram_commitment_scheme,
+    normalized.svbk_at_capture,
+    normalized.attestation,
+    normalized.attestation_scheme,
+    rawJson,
+    now,
+  ).run();
+}
+
+export async function commitExists(env, inscriptionId) {
+  const row = await env.DB.prepare(
+    "SELECT 1 AS ok FROM commits WHERE inscription_id = ? LIMIT 1"
+  ).bind(inscriptionId).first();
+  return !!row;
+}
+
+export async function commitById(env, inscriptionId) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM commits WHERE inscription_id = ? LIMIT 1"
+  ).bind(inscriptionId).first();
+  return row ?? null;
+}
+
+export async function pokemonExists(env, mintInscriptionId) {
+  const row = await env.DB.prepare(
+    "SELECT 1 AS ok FROM pokemon WHERE mint_inscription_id = ? LIMIT 1"
+  ).bind(mintInscriptionId).first();
+  return !!row;
+}
+
+export async function pokemonByCommit(env, refCaptureCommit) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM pokemon WHERE ref_capture_commit = ? LIMIT 1"
+  ).bind(refCaptureCommit).first();
+  return row ?? null;
+}
+
+export async function insertPokemon(env, mintInscriptionId, normalized, rawJson) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(`
+    INSERT INTO pokemon (
+      mint_inscription_id, ref_capture_commit, network, signed_in_wallet,
+      party_slot_index, species_id, species_name, level, shiny,
+      iv_atk, iv_def, iv_spe, iv_special, iv_hp, iv_total,
+      ev_hp, ev_atk, ev_def, ev_spe, ev_spc,
+      status, held_item, friendship, pokerus, catch_rate,
+      moves_json, pp_json, name, description, image, attributes_json,
+      raw_mint_json, registered_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    mintInscriptionId,
+    normalized.ref_capture_commit,
+    normalized.network,
+    normalized.signed_in_wallet,
+    normalized.party_slot_index,
+    normalized.species_id,
+    normalized.species_name,
+    normalized.level,
+    normalized.shiny,
+    normalized.iv_atk, normalized.iv_def, normalized.iv_spe, normalized.iv_special,
+    normalized.iv_hp, normalized.iv_total,
+    normalized.ev_hp, normalized.ev_atk, normalized.ev_def, normalized.ev_spe, normalized.ev_spc,
+    normalized.status, normalized.held_item, normalized.friendship, normalized.pokerus,
+    normalized.catch_rate,
+    normalized.moves_json, normalized.pp_json,
+    normalized.name, normalized.description, normalized.image, normalized.attributes_json,
+    rawJson, now,
+  ).run();
+}
+
+export async function pokemonByOwner(env, ownerAddress, network, limit = 50, offset = 0) {
+  const rows = await env.DB.prepare(`
+    SELECT * FROM pokemon
+    WHERE signed_in_wallet = ? AND network = ?
+    ORDER BY registered_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(ownerAddress, network, limit, offset).all();
+  return rows?.results ?? [];
+}
+
+export async function pokemonBySpecies(env, speciesId, network, limit = 50, offset = 0) {
+  const rows = await env.DB.prepare(`
+    SELECT * FROM pokemon
+    WHERE species_id = ? AND network = ?
+    ORDER BY iv_total DESC, registered_at ASC
+    LIMIT ? OFFSET ?
+  `).bind(speciesId, network, limit, offset).all();
+  return rows?.results ?? [];
+}
+
 export async function networkStats(env) {
   const row = await env.DB.prepare(`
     SELECT
