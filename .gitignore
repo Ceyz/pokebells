@@ -40,6 +40,12 @@ test-nintondo.html
 tools/*
 !tools/package-indexer-for-inscription.mjs
 !tools/apply-d1-schema.mjs
+!tools/pokebells-inscriber/
+tools/pokebells-inscriber/node_modules/
+tools/pokebells-inscriber/dist/
+!tools/bells-inscriber-vendor/
+tools/bells-inscriber-vendor/*.tgz
+tools/bells-inscriber-vendor/node_modules/
 
 # Phase 4.5 relay — transparent transport layer, safe to publish
 # (no ROM, no IP, pure WebSocket relay + signature verification)

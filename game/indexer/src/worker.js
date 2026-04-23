@@ -8,9 +8,15 @@
 //
 // Supported ops:
 //   POST /api/captures  { inscription_id, network }  — register a capture
-//   POST /api/reveals   { inscription_id, network }  — register a reveal;
-//     triggers validator cross-check against the matching capture and
-//     copies revealed IVs/EVs/shiny onto the capture row.
+//   POST /api/reveals   { inscription_id, network }  — register an on-chain
+//     reveal inscription; validator cross-checks commitments against the
+//     capture and copies revealed IVs/EVs/shiny onto the capture row.
+//   POST /api/reveals/offchain { capture_inscription_id, network,
+//       ivs, ivs_salt_hex, ram_snapshot, shiny?, evs? } — reveal by
+//     preimage without a second inscription. Same commitment checks as the
+//     on-chain reveal. Stored under the sentinel reveal_inscription_id
+//     "offchain:<capture_inscription_id>" so onchain reveals still win
+//     (COALESCE semantics in applyRevealToCapture).
 //   GET  /api/captures/:id  — lookup
 //   GET  /api/trainer/:owner
 //   GET  /api/pokedex?species=N
@@ -239,6 +245,95 @@ async function handlePostReveal(request, env) {
   });
 }
 
+// Off-chain reveal: the user publishes the IV+salt+ram_snapshot preimages
+// directly to the indexer instead of inscribing a second ordinal. Security
+// model: the capture's ivs_commitment + ram_snapshot_hash on-chain are the
+// cryptographic anchor. Anyone can independently verify that these preimages
+// match those commitments; the indexer just stores + serves them. A future
+// on-chain op:"reveal" inscription would override (see COALESCE in
+// applyRevealToCapture), so off-chain is strictly additive — no lock-in.
+async function handlePostRevealOffchain(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ ok: false, error: "invalid_json" }, { status: 400 }); }
+
+  const captureId = typeof body?.capture_inscription_id === "string"
+    ? body.capture_inscription_id.trim() : "";
+  const network = typeof body?.network === "string" ? body.network.trim() : "";
+
+  if (!INSCRIPTION_ID_RE.test(captureId)) {
+    return json({ ok: false, error: "bad_capture_inscription_id" }, { status: 400 });
+  }
+  if (network !== "bells-mainnet" && network !== "bells-testnet") {
+    return json({ ok: false, error: "bad_network" }, { status: 400 });
+  }
+
+  const ipPrefix = clientIpPrefix(request);
+  const offchainId = `offchain:${captureId}`;
+
+  const captureRow = await captureById(env, captureId);
+  if (!captureRow) {
+    await logIngestion(env, offchainId, "reveal", network, "invalid", "capture_not_registered", ipPrefix);
+    return json(
+      { ok: false, error: "capture_not_registered", reason: "register the capture inscription first" },
+      { status: 422 },
+    );
+  }
+  if (captureRow.reveal_inscription_id) {
+    return json({
+      ok: true,
+      status: "already_revealed",
+      transport: captureRow.reveal_inscription_id.startsWith("offchain:") ? "offchain" : "onchain",
+      capture_inscription_id: captureId,
+      reveal_inscription_id: captureRow.reveal_inscription_id,
+    });
+  }
+
+  // Build a reveal-shaped record the existing validateReveal understands.
+  // The ref + schema_version + p/op fields let us reuse the same commitment
+  // verifier that on-chain reveals go through.
+  const revealParsed = {
+    p: "pokebells",
+    op: "reveal",
+    schema_version: "1.4",
+    reveal_transport: "offchain",
+    ref: captureId,
+    ivs: body.ivs,
+    ivs_salt_hex: typeof body.ivs_salt_hex === "string" ? body.ivs_salt_hex : "",
+    ram_snapshot: typeof body.ram_snapshot === "string" ? body.ram_snapshot : "",
+    shiny: Boolean(body.shiny),
+    evs: body.evs ?? null,
+  };
+
+  const check = await validateReveal(revealParsed, captureRow, env);
+  if (!check.ok) {
+    await logIngestion(env, offchainId, "reveal", network, "invalid", `${check.stage}: ${check.reason}`, ipPrefix);
+    return json(
+      { ok: false, error: "reveal_invalid", stage: check.stage, reason: check.reason },
+      { status: 422 },
+    );
+  }
+
+  try {
+    await insertReveal(env, offchainId, network, check.normalized, JSON.stringify(revealParsed));
+    await applyRevealToCapture(env, offchainId, check.normalized);
+    await logIngestion(env, offchainId, "reveal", network, "ok", "offchain", ipPrefix);
+  } catch (e) {
+    await logIngestion(env, offchainId, "reveal", network, "error", e.message, ipPrefix);
+    return json({ ok: false, error: "db_error", reason: e.message }, { status: 500 });
+  }
+
+  return json({
+    ok: true,
+    status: "revealed",
+    transport: "offchain",
+    capture_inscription_id: captureId,
+    reveal_inscription_id: offchainId,
+    iv_total: check.normalized.iv_total,
+    shiny: check.normalized.shiny,
+  });
+}
+
 async function handlePostSave(request, env) {
   let body;
   try { body = await request.json(); }
@@ -417,6 +512,9 @@ export default {
     }
     if (url.pathname === "/api/reveals" && request.method === "POST") {
       return handlePostReveal(request, env);
+    }
+    if (url.pathname === "/api/reveals/offchain" && request.method === "POST") {
+      return handlePostRevealOffchain(request, env);
     }
     if (url.pathname === "/api/saves" && request.method === "POST") {
       return handlePostSave(request, env);

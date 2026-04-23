@@ -395,10 +395,17 @@
 
   <div class="row">
     <button id="validate-btn" class="secondary">Validate JSON</button>
-    <button id="mint-btn" disabled>Copy JSON + open Inscriber</button>
+    <button id="direct-mint-btn" disabled>Mint on-chain (1 click)</button>
+    <button id="mint-btn" class="secondary" disabled>Copy JSON + open Inscriber</button>
     <span id="mint-cost" class="pill warn hidden">cost: 1 $POKEBALL (post-Phase 8)</span>
   </div>
 
+  <p class="muted small" style="margin-top: 6px;">
+    <strong>Mint on-chain</strong> signs + broadcasts directly from the wallet (2 tx confirmations, no paste, auto-reveals IVs via the indexer).
+    <strong>Copy JSON + open Inscriber</strong> is the manual fallback if direct mint fails.
+  </p>
+
+  <div id="direct-mint-status" class="muted small" style="margin-top: 8px;"></div>
   <div id="validation-result"></div>
 
   <!-- Post-inscribe step: user pastes the returned inscription id and the
@@ -973,6 +980,7 @@
     if (!result.ok) {
       out.innerHTML = `<p><span class="pill err">INVALID</span> ${result.error}</p>`;
       $("mint-btn").disabled = true;
+      $("direct-mint-btn").disabled = true;
       validatedJson = null;
       log(`validation failed: ${result.error}`);
       return;
@@ -986,6 +994,7 @@
       `commitment ${commitShort}…, attested v2). ` +
       `<span class="muted">IVs / EVs / shiny revealed by op:"reveal" after mint.</span></p>`;
     $("mint-btn").disabled = false;
+    $("direct-mint-btn").disabled = false;
     $("mint-cost").classList.remove("hidden");
     validatedJson = raw;
     log(`validation OK: species=${parsed.species_id} level=${parsed.level} network=${parsed.capture_network}`);
@@ -1138,6 +1147,257 @@
     }
     return null;
   };
+
+  // --- Direct on-chain mint (client-side PSBT builder) ---
+  //
+  // Signs + broadcasts the capture inscription via window.nintondo.signPsbt,
+  // then auto-posts the preimages to /api/reveals/offchain so IVs / EVs /
+  // shiny appear on the capture row without a second inscription.
+  //
+  // The commit-reveal commitment (ivs_commitment + ram_snapshot_hash) remains
+  // on-chain in the capture body — the off-chain reveal is just the
+  // preimages, anyone can independently verify them. A user who prefers full
+  // on-chain reveal can still do it later via buildRevealRecord + inscribe;
+  // the COALESCE logic in the indexer prefers on-chain over off-chain.
+
+  const setDirectMintStatus = (text, tone) => {
+    const el = $("direct-mint-status");
+    if (!el) return;
+    el.textContent = text ?? "";
+    el.className = tone === "err" ? "pill err"
+      : tone === "ok" ? "pill ok"
+      : tone === "warn" ? "pill warn"
+      : "muted small";
+  };
+
+  // Read the captureReveals row persisted by the game tab (shell.js
+  // openDb('pokebells-phase1') creates store 'captureReveals' keyed by
+  // attestation). Same-origin required — on prod deploys where the game
+  // loads from a Nintondo content host, the privateReveal must travel via
+  // postMessage / play-bridge instead (future work).
+  const readPrivateRevealFromIdb = async (attestationHex) => {
+    if (typeof indexedDB === "undefined") return null;
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open("pokebells-phase1", 3);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error("IDB open blocked"));
+    }).catch(() => null);
+    if (!db || !db.objectStoreNames.contains("captureReveals")) {
+      try { db?.close(); } catch {}
+      return null;
+    }
+    const row = await new Promise((resolve) => {
+      try {
+        const tx = db.transaction("captureReveals", "readonly")
+          .objectStore("captureReveals")
+          .get(attestationHex.toLowerCase());
+        tx.onsuccess = () => resolve(tx.result ?? null);
+        tx.onerror = () => resolve(null);
+      } catch { resolve(null); }
+    });
+    try { db.close(); } catch {}
+    return row?.private_reveal ?? null;
+  };
+
+  const fetchUtxosForAddress = async (address, apiBase) => {
+    const res = await fetch(`${apiBase}/address/${encodeURIComponent(address)}/utxo`);
+    if (!res.ok) throw new Error(`utxo fetch ${res.status}`);
+    const list = await res.json();
+    if (!Array.isArray(list)) throw new Error("utxo response is not an array");
+    const cache = new Map();
+    const out = [];
+    for (const u of list) {
+      if (!cache.has(u.txid)) {
+        const r = await fetch(`${apiBase}/tx/${u.txid}/hex`);
+        if (!r.ok) throw new Error(`tx/${u.txid}/hex ${r.status}`);
+        cache.set(u.txid, (await r.text()).trim());
+      }
+      out.push({
+        txid: u.txid,
+        vout: u.vout,
+        value: Number(u.value),
+        hex: cache.get(u.txid),
+      });
+    }
+    return out;
+  };
+
+  const broadcastTxHex = async (apiBase, hex) => {
+    const res = await fetch(`${apiBase}/tx`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: hex,
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`broadcast ${res.status}: ${txt.slice(0, 200)}`);
+    }
+    return (await res.text()).trim();
+  };
+
+  const electrsBaseForNetwork = (networkKey) =>
+    networkKey === "bells-mainnet"
+      ? "https://api.nintondo.io"
+      : "https://bells-testnet-api.nintondo.io";
+
+  $("direct-mint-btn").addEventListener("click", async () => {
+    if (!validatedJson) return;
+    if (!connectedAddress) {
+      setDirectMintStatus("Connect your wallet first (Section 1).", "err");
+      return;
+    }
+    const parsedCapture = JSON.parse(validatedJson);
+    const attestation = String(parsedCapture.attestation ?? "").toLowerCase();
+    const networkKey = normalizeNetworkKey(parsedCapture.capture_network);
+    if (!networkKey) {
+      setDirectMintStatus("capture_network must be bells-mainnet or bells-testnet.", "err");
+      return;
+    }
+    const apiBase = electrsBaseForNetwork(networkKey);
+
+    // 1. Load the private reveal preimages from the game tab's IDB.
+    const privateReveal = await readPrivateRevealFromIdb(attestation);
+    if (!privateReveal) {
+      setDirectMintStatus(
+        "No private-reveal preimage found in IDB for this attestation. " +
+        "Either (a) capture was made in a different origin / tab, or (b) " +
+        "the reveal data was wiped. Use the manual flow (right button) instead.",
+        "warn",
+      );
+      return;
+    }
+
+    $("direct-mint-btn").disabled = true;
+    $("mint-btn").disabled = true;
+    setDirectMintStatus("Loading inscriber bundle…");
+
+    let inscriber;
+    try {
+      inscriber = await import("./inscriber/pokebells-inscriber.browser.mjs");
+    } catch (e) {
+      setDirectMintStatus(`Failed to load inscriber bundle: ${e.message}`, "err");
+      $("direct-mint-btn").disabled = false;
+      return;
+    }
+
+    try {
+      setDirectMintStatus("Fetching wallet UTXOs…");
+      const pubkeyHex = await window.nintondo.getPublicKey();
+      const pubkey = new Uint8Array(pubkeyHex.match(/.{2}/g).map((b) => parseInt(b, 16)));
+      const net = inscriber.networkForKey(networkKey);
+
+      const utxos = await fetchUtxosForAddress(connectedAddress, apiBase);
+      if (utxos.length === 0) throw new Error("wallet has no UTXOs on this network");
+
+      const getUtxos = async (requiredAmount) => {
+        utxos.sort((a, b) => b.value - a.value);
+        const picked = [];
+        let total = 0;
+        for (const u of utxos) {
+          picked.push(u);
+          total += u.value;
+          if (total >= requiredAmount + 5000) break;
+        }
+        if (total < requiredAmount) throw new Error(`insufficient: have ${total}, need ${requiredAmount}`);
+        return picked;
+      };
+
+      const body = new TextEncoder().encode(validatedJson);
+
+      setDirectMintStatus("Building PSBTs — wallet will prompt twice (fund + reveal).");
+      log(`direct-mint: building inscription for ${body.byteLength}B on ${networkKey}`);
+
+      const { fundTxHex, revealTxHex, inscriptionId } = await inscriber.inscribe({
+        toAddress: connectedAddress,
+        fromAddress: connectedAddress,
+        contentType: "application/json",
+        data: Buffer.from(body),
+        feeRate: 150,
+        publicKey: Buffer.from(pubkey),
+        signPsbt: async (psbtBase64) =>
+          await window.nintondo.signPsbt(psbtBase64, { autoFinalized: true }),
+        getUtxos,
+        network: net,
+      });
+
+      setDirectMintStatus("Broadcasting fund tx…");
+      const fundTxid = await broadcastTxHex(apiBase, fundTxHex);
+      log(`direct-mint: fund broadcast ${fundTxid}`);
+
+      await new Promise((r) => setTimeout(r, 1500));
+
+      setDirectMintStatus("Broadcasting reveal tx…");
+      const revealTxid = await broadcastTxHex(apiBase, revealTxHex);
+      log(`direct-mint: reveal broadcast ${revealTxid}`);
+
+      setDirectMintStatus(
+        `Minted ✓ inscription ${inscriptionId.slice(0, 16)}… — waiting for confirmation before registering.`,
+        "ok",
+      );
+
+      // Wait a few seconds for the indexer to see the new inscription, then
+      // register + auto-reveal. If confirmation is slow, the poll retries.
+      const registerWithRetry = async () => {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const r = await fetch(`${INDEXER_BASE}/api/captures`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ inscription_id: inscriptionId, network: networkKey }),
+          });
+          const payload = await r.json().catch(() => ({}));
+          if (r.ok) return payload;
+          if (payload?.stage === "fetch" || payload?.stage === "schema") {
+            await new Promise((s) => setTimeout(s, 6000));
+            continue;
+          }
+          throw new Error(payload?.reason ?? `register failed HTTP ${r.status}`);
+        }
+        throw new Error("register timed out after 2 min — inscription may still be unconfirmed");
+      };
+
+      setDirectMintStatus(`Waiting for confirmation + registering with indexer…`);
+      const capturePayload = await registerWithRetry();
+      log(`direct-mint: capture registered ${inscriptionId}`);
+
+      setDirectMintStatus(`Revealing IVs / EVs / shiny off-chain…`);
+      const revealRes = await fetch(`${INDEXER_BASE}/api/reveals/offchain`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          capture_inscription_id: inscriptionId,
+          network: networkKey,
+          ivs: privateReveal.ivs,
+          ivs_salt_hex: privateReveal.ivs_salt_hex,
+          ram_snapshot: privateReveal.ram_snapshot_base64,
+          evs: privateReveal.evs ?? null,
+          // shiny is derivable from IVs; the indexer recomputes it.
+        }),
+      });
+      const revealPayload = await revealRes.json().catch(() => ({}));
+      if (!revealRes.ok) {
+        setDirectMintStatus(
+          `Capture registered but reveal failed: ${revealPayload?.reason ?? revealRes.status}. ` +
+          `IVs will stay hidden until you retry or inscribe the reveal manually.`,
+          "warn",
+        );
+        return;
+      }
+
+      setDirectMintStatus(
+        `Minted + revealed ✓ species ${capturePayload?.species_id ?? "?"}, ` +
+        `IV total ${revealPayload?.iv_total ?? "?"}` +
+        `${revealPayload?.shiny ? ", SHINY" : ""}. Inscription: ${inscriptionId}`,
+        "ok",
+      );
+      log(`direct-mint DONE ${inscriptionId} iv_total=${revealPayload?.iv_total}`);
+    } catch (e) {
+      setDirectMintStatus(`Direct mint failed: ${e.message ?? e}`, "err");
+      log(`direct-mint failed: ${e.stack ?? e.message ?? e}`);
+      $("direct-mint-btn").disabled = false;
+      $("mint-btn").disabled = false;
+    }
+  });
 
   $("mint-btn").addEventListener("click", async () => {
     if (!validatedJson) {

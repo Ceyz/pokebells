@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <title>PokeBells mint-probe (direct on-chain)</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: Inter, sans-serif; background: #101313; color: #e6f0ec;
+           margin: 0; padding: 24px; max-width: 960px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.sub { color: #8b9a95; margin: 0 0 20px; font-size: 13px; }
+    .band { background: #171c1c; border: 1px solid #2f3b39; border-radius: 8px;
+            padding: 16px; margin-bottom: 16px; }
+    .band h2 { font-size: 14px; margin: 0 0 10px; }
+    button { background: #5fc4ff; color: #000; border: 0; border-radius: 6px;
+             padding: 8px 14px; font-weight: 600; cursor: pointer; margin-right: 8px; }
+    button:disabled { background: #2f3b39; color: #8b9a95; cursor: not-allowed; }
+    button.secondary { background: #2a3635; color: #e6f0ec; }
+    input, textarea, select { background: #101313; color: #e6f0ec; border: 1px solid #2f3b39;
+              border-radius: 6px; padding: 6px 8px; font-family: inherit; font-size: 13px; }
+    textarea { width: 100%; min-height: 120px; font-family: ui-monospace, monospace; font-size: 12px; }
+    .row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
+    .row label { min-width: 120px; color: #8b9a95; font-size: 12px; }
+    .row input, .row select { flex: 1; }
+    pre { background: #0d1010; border: 1px solid #2f3b39; border-radius: 6px;
+          padding: 10px; overflow-x: auto; font-size: 12px; margin: 0; }
+    .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+            font-weight: 600; }
+    .pill.ok { background: #1e3a1e; color: #72d572; }
+    .pill.err { background: #3a1e1e; color: #ff7a7a; }
+    .pill.warn { background: #3a321e; color: #e3b55d; }
+    .muted { color: #8b9a95; font-size: 12px; }
+    .log { height: 180px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, monospace;
+           font-size: 11px; background: #0a0d0d; border: 1px solid #2f3b39; border-radius: 6px; padding: 8px; }
+  </style>
+</head>
+<body>
+  <h1>PokeBells mint-probe</h1>
+  <p class="sub">Client-side ordinals builder. Connects to <code>window.nintondo</code>,
+     constructs commit+reveal PSBTs locally, submits to the wallet for signature,
+     broadcasts via the Nintondo electrs endpoint. No Inscriber paste needed.</p>
+
+  <div class="band">
+    <h2>1 · Wallet</h2>
+    <div class="row">
+      <label>Network</label>
+      <select id="network">
+        <option value="bellsTestnet" selected>bells-testnet (tbel1...)</option>
+        <option value="bellsMainnet">bells-mainnet (bel1...)</option>
+      </select>
+      <button id="connect">Connect</button>
+    </div>
+    <div class="row"><label>Status</label><span id="wallet-status" class="muted">Not connected.</span></div>
+    <div class="row"><label>Address</label><span id="addr" class="muted">—</span></div>
+    <div class="row"><label>Public key</label><span id="pubkey" class="muted">—</span></div>
+    <div class="row"><label>Balance</label><span id="balance" class="muted">—</span></div>
+  </div>
+
+  <div class="band">
+    <h2>2 · UTXO fetch</h2>
+    <div class="row">
+      <label>API base</label>
+      <input id="api-base" value="https://bells-testnet-api.nintondo.io">
+      <button id="fetch-utxos" class="secondary">Fetch UTXOs</button>
+    </div>
+    <pre id="utxo-summary">Not fetched.</pre>
+  </div>
+
+  <div class="band">
+    <h2>3 · Inscription payload</h2>
+    <div class="row">
+      <label>MIME</label>
+      <input id="mime" value="application/json" style="max-width: 200px;">
+      <label>Fee rate (sat/vB)</label>
+      <input id="fee-rate" type="number" value="150" style="max-width: 120px;">
+    </div>
+    <label class="muted">Body (text)</label>
+    <textarea id="body">{ "p": "pokebells", "op": "mint-probe", "note": "hello from client-side PSBT builder" }</textarea>
+    <div class="row" style="margin-top: 10px;">
+      <button id="inscribe">Inscribe (2 popups)</button>
+      <span class="muted">First popup = fund (commit) tx. Second popup = reveal tx.</span>
+    </div>
+  </div>
+
+  <div class="band">
+    <h2>4 · Result</h2>
+    <div class="row"><label>Fund txid</label><span id="fund-txid" class="muted">—</span></div>
+    <div class="row"><label>Reveal txid</label><span id="reveal-txid" class="muted">—</span></div>
+    <div class="row"><label>Inscription id</label><span id="inscription-id" class="muted">—</span></div>
+  </div>
+
+  <div class="band">
+    <h2>Log</h2>
+    <div id="log" class="log"></div>
+  </div>
+
+  <script type="module">
+    import { inscribe, networkForKey } from "./inscriber/pokebells-inscriber.browser.mjs";
+
+    const $ = (id) => document.getElementById(id);
+    const log = (msg, tone) => {
+      const el = $("log");
+      const ts = new Date().toISOString().slice(11, 19);
+      el.textContent += `${ts}  ${tone ? "[" + tone + "] " : ""}${msg}\n`;
+      el.scrollTop = el.scrollHeight;
+    };
+
+    function setStatus(id, text, tone) {
+      const el = $(id);
+      el.textContent = text;
+      el.className = tone ? `pill ${tone}` : "muted";
+    }
+
+    let connected = { address: null, publicKey: null, network: null };
+
+    async function waitForWallet(timeoutMs = 3000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (typeof window.nintondo !== "undefined") return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return typeof window.nintondo !== "undefined";
+    }
+
+    $("connect").addEventListener("click", async () => {
+      if (!(await waitForWallet())) {
+        setStatus("wallet-status", "window.nintondo not injected", "err");
+        return;
+      }
+      const netKey = $("network").value;
+      try {
+        const result = await window.nintondo.connect(netKey);
+        const address = typeof result === "string"
+          ? result
+          : result?.address ?? await window.nintondo.getAccount();
+        const pubkeyHex = await window.nintondo.getPublicKey();
+        connected = { address, publicKey: pubkeyHex, network: netKey };
+        $("addr").textContent = address;
+        $("pubkey").textContent = pubkeyHex.length > 20 ? pubkeyHex.slice(0, 10) + "…" + pubkeyHex.slice(-6) : pubkeyHex;
+        setStatus("wallet-status", `connected (${netKey})`, "ok");
+        log(`connected address=${address} pubkey=${pubkeyHex.slice(0, 12)}…`);
+        try {
+          const bal = await window.nintondo.getBalance();
+          $("balance").textContent = typeof bal === "object"
+            ? `confirmed ${bal.confirmed} / unconfirmed ${bal.unconfirmed} (sats)`
+            : JSON.stringify(bal);
+        } catch (e) { log(`getBalance failed: ${e.message}`, "warn"); }
+
+        // Auto-set API base for network
+        $("api-base").value = netKey === "bellsMainnet"
+          ? "https://api.nintondo.io"
+          : "https://bells-testnet-api.nintondo.io";
+      } catch (e) {
+        setStatus("wallet-status", `connect failed: ${e.message}`, "err");
+        log(`connect failed: ${e.message}`, "err");
+      }
+    });
+
+    async function fetchUtxosFromApi(address, apiBase) {
+      const res = await fetch(`${apiBase}/address/${encodeURIComponent(address)}/utxo`);
+      if (!res.ok) throw new Error(`utxo fetch ${res.status}`);
+      const list = await res.json();
+      if (!Array.isArray(list)) throw new Error(`utxo response is not an array`);
+      // Each entry has { txid, vout, value, status }. We need .hex too.
+      // Fetch raw tx hex per-txid (cached by txid to dedupe).
+      const cache = new Map();
+      const withHex = [];
+      for (const u of list) {
+        if (!cache.has(u.txid)) {
+          const r = await fetch(`${apiBase}/tx/${u.txid}/hex`);
+          if (!r.ok) throw new Error(`tx/${u.txid}/hex ${r.status}`);
+          cache.set(u.txid, (await r.text()).trim());
+        }
+        withHex.push({
+          txid: u.txid,
+          vout: u.vout,
+          value: Number(u.value),
+          hex: cache.get(u.txid),
+        });
+      }
+      return withHex;
+    }
+
+    $("fetch-utxos").addEventListener("click", async () => {
+      if (!connected.address) { log("connect the wallet first", "err"); return; }
+      const apiBase = $("api-base").value.trim().replace(/\/$/, "");
+      try {
+        const utxos = await fetchUtxosFromApi(connected.address, apiBase);
+        window.__probeUtxos = utxos;
+        const total = utxos.reduce((a, u) => a + u.value, 0);
+        $("utxo-summary").textContent =
+          `${utxos.length} UTXO(s), total ${total} sats\n` +
+          utxos.slice(0, 5).map((u) => `  ${u.txid}:${u.vout}  ${u.value} sats  hex=${u.hex.length}B`).join("\n") +
+          (utxos.length > 5 ? `\n  … (+${utxos.length - 5} more)` : "");
+        log(`fetched ${utxos.length} utxos (total ${total} sats)`);
+      } catch (e) {
+        $("utxo-summary").textContent = `ERROR: ${e.message}`;
+        log(`utxo fetch failed: ${e.message}`, "err");
+      }
+    });
+
+    // Adapt the Nintondo signPsbt to the (base64, isReveal) callback our
+    // inscribe() expects. autoFinalized=true works for both fund and reveal
+    // per bells-inscriber upstream.
+    async function signPsbtViaNintondo(psbtBase64, _isReveal) {
+      // Nintondo signPsbt accepts (psbtBase64, options?). Return signed base64.
+      return await window.nintondo.signPsbt(psbtBase64, {
+        autoFinalized: true,
+      });
+    }
+
+    async function broadcastTx(apiBase, hex) {
+      const res = await fetch(`${apiBase}/tx`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: hex,
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`broadcast ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      return (await res.text()).trim();
+    }
+
+    $("inscribe").addEventListener("click", async () => {
+      if (!connected.address) { log("connect wallet first", "err"); return; }
+      const apiBase = $("api-base").value.trim().replace(/\/$/, "");
+      const mime = $("mime").value.trim();
+      const body = new TextEncoder().encode($("body").value);
+      const feeRate = Number($("fee-rate").value);
+
+      $("inscribe").disabled = true;
+      try {
+        const net = networkForKey(connected.network);
+        const pubkey = Buffer.from(connected.publicKey, "hex");
+        log(`building inscription: mime=${mime} body=${body.byteLength}B feeRate=${feeRate} sat/vB`);
+
+        const getUtxos = async (requiredAmount) => {
+          const utxos = window.__probeUtxos ?? await fetchUtxosFromApi(connected.address, apiBase);
+          // Take enough to cover requiredAmount with a small margin.
+          utxos.sort((a, b) => b.value - a.value);
+          const picked = [];
+          let total = 0;
+          for (const u of utxos) {
+            picked.push(u);
+            total += u.value;
+            if (total >= requiredAmount + 5000) break;
+          }
+          log(`picked ${picked.length} utxos (total ${total}, needed ~${requiredAmount})`);
+          return picked;
+        };
+
+        const { fundTxHex, revealTxHex, inscriptionId } = await inscribe({
+          toAddress: connected.address,
+          fromAddress: connected.address,
+          contentType: mime,
+          data: Buffer.from(body),
+          feeRate,
+          publicKey: pubkey,
+          signPsbt: signPsbtViaNintondo,
+          getUtxos,
+          network: net,
+        });
+        log(`fund tx ready (${fundTxHex.length / 2} bytes)`);
+        log(`reveal tx ready (${revealTxHex.length / 2} bytes)`);
+        log(`prospective inscription id = ${inscriptionId}`);
+
+        const fundTxid = await broadcastTx(apiBase, fundTxHex);
+        $("fund-txid").textContent = fundTxid;
+        log(`fund broadcast OK: ${fundTxid}`);
+
+        // Small delay so the mempool acknowledges before the reveal spends it.
+        await new Promise((r) => setTimeout(r, 1500));
+
+        const revealTxid = await broadcastTx(apiBase, revealTxHex);
+        $("reveal-txid").textContent = revealTxid;
+        $("inscription-id").textContent = `${revealTxid}i0`;
+        log(`reveal broadcast OK: ${revealTxid}`);
+        log(`INSCRIPTION ID = ${revealTxid}i0`, "ok");
+      } catch (e) {
+        log(`inscribe failed: ${e.stack ?? e.message}`, "err");
+      } finally {
+        $("inscribe").disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
