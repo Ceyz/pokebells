@@ -402,6 +402,59 @@ function inscribeLocal({
 }
 
 // ======================================================================
+// Tier-2 template filler
+// ======================================================================
+// rom-manifest and main-manifest are JSON templates whose *_INSCRIPTION_ID
+// placeholders must be replaced with real tier-1 inscription ids before
+// inscribing. Placeholders match the `placeholder` field of each tier-1
+// asset in the checklist, so we walk progress, build a map, and do N
+// substring replaces. If any placeholder in the template is still
+// present after substitution, we defer the asset — the caller can
+// re-run once the missing tier-1 ids land in progress.
+//
+// main-manifest additionally depends on rom-manifest being inscribed
+// first (via ROM_MANIFEST_INSCRIPTION_ID). The single-pass loop handles
+// this naturally because rom-manifest comes first in checklist order
+// and its progress entry is persisted before the main-manifest
+// iteration reads it.
+//
+// For pokebells_inscriber_chunks (array field in main-manifest), each
+// element is a separate placeholder string; they resolve independently.
+function fillTier2FromProgress(asset, checklist, progress) {
+  const filePath = path.resolve(REPO_ROOT, asset.file);
+  let text = fs.readFileSync(filePath, "utf8");
+
+  // Build placeholder -> inscription_id map from tier-1 entries already
+  // persisted in progress. We also add the current asset's own OWN
+  // placeholder mapped to null so we know not to self-reference.
+  const map = new Map();
+  for (const a of checklist.assets) {
+    if (!a.placeholder) continue;
+    const key = `${a.role}:${a.inscribeAs}`;
+    const entry = progress.inscriptions[key];
+    if (entry?.inscription_id) map.set(a.placeholder, entry.inscription_id);
+  }
+
+  let replaced = 0;
+  for (const [placeholder, id] of map.entries()) {
+    const before = text.length;
+    text = text.split(placeholder).join(id);
+    if (text.length !== before) replaced++;
+  }
+
+  // Find unresolved *_INSCRIPTION_ID tokens (anything matching the
+  // placeholder shape that's still in the text).
+  const unresolvedSet = new Set();
+  for (const a of checklist.assets) {
+    if (a.placeholder && text.includes(a.placeholder)) {
+      unresolvedSet.add(a.placeholder);
+    }
+  }
+
+  return { text, replaced, unresolved: Array.from(unresolvedSet) };
+}
+
+// ======================================================================
 // Progress file
 // ======================================================================
 function progressFilePath(network) {
@@ -513,18 +566,57 @@ async function main() {
   // if Bells rejects the next commit for exceeding the mempool-chain
   // descendant-size limit (101 KB default).
   let lastRevealTxid = null;
+  // Supported tier-2 manifests. For other tier-2 roles (sprite-pack-manifest,
+  // collection-metadata, root-html) we defer — they need role-specific fill
+  // logic or a separate template that doesn't exist yet.
+  const AUTO_FILL_ROLES = new Set(["rom-manifest", "main-manifest"]);
+
+  let tier2Deferred = 0;
   for (const asset of remaining) {
     idx++;
     const key = assetKey(asset);
-    console.log(`[${idx}/${remaining.length}] ${asset.role} ${asset.inscribeAs} (${asset.bytes}B sha=${asset.sha256.slice(0, 16)}…)`);
+    let data;
+    let assetSha = asset.sha256;
+    let assetBytes = asset.bytes;
 
-    // Load + verify content
-    const filePath = path.resolve(REPO_ROOT, asset.file);
-    const data = fs.readFileSync(filePath);
-    const actualSha = crypto.createHash("sha256").update(data).digest("hex");
-    if (actualSha !== asset.sha256) {
-      console.error(`  sha256 mismatch, refusing. expected=${asset.sha256} got=${actualSha}`);
-      process.exit(1);
+    // Tier-2+ manifests have sha256=null in the checklist — their content
+    // depends on tier-1 inscription ids being filled first. Auto-fill the
+    // ones we know how to handle; defer the rest.
+    if (assetSha == null || assetBytes == null) {
+      if (!AUTO_FILL_ROLES.has(asset.role)) {
+        tier2Deferred++;
+        console.log(`[${idx}/${remaining.length}] ${asset.role} ${asset.inscribeAs} — DEFERRED (no auto-fill strategy)`);
+        continue;
+      }
+      const filled = fillTier2FromProgress(asset, checklist, progress);
+      if (filled.unresolved.length > 0) {
+        tier2Deferred++;
+        console.log(
+          `[${idx}/${remaining.length}] ${asset.role} ${asset.inscribeAs} — DEFERRED `
+          + `(${filled.unresolved.length} placeholders still unresolved: `
+          + `${filled.unresolved.slice(0, 3).join(", ")}${filled.unresolved.length > 3 ? "…" : ""})`,
+        );
+        continue;
+      }
+      data = Buffer.from(filled.text, "utf8");
+      assetSha = crypto.createHash("sha256").update(data).digest("hex");
+      assetBytes = data.length;
+      console.log(
+        `[${idx}/${remaining.length}] ${asset.role} ${asset.inscribeAs} `
+        + `(FILLED ${assetBytes}B sha=${assetSha.slice(0, 16)}…, `
+        + `replaced ${filled.replaced} placeholders)`,
+      );
+    } else {
+      console.log(`[${idx}/${remaining.length}] ${asset.role} ${asset.inscribeAs} (${asset.bytes}B sha=${asset.sha256.slice(0, 16)}…)`);
+
+      // Load + verify content
+      const filePath = path.resolve(REPO_ROOT, asset.file);
+      data = fs.readFileSync(filePath);
+      const actualSha = crypto.createHash("sha256").update(data).digest("hex");
+      if (actualSha !== asset.sha256) {
+        console.error(`  sha256 mismatch, refusing. expected=${asset.sha256} got=${actualSha}`);
+        process.exit(1);
+      }
     }
 
     let result;
@@ -590,6 +682,11 @@ async function main() {
 
   console.log(`\n[done] ${idx} asset(s) processed. Progress: ${progressFilePath(opts.network)}`);
   console.log(`[done] Remaining UTXO pool: ${utxoPool.length} entries, ${utxoPool.reduce((s, u) => s + u.value, 0)} sats`);
+  if (tier2Deferred > 0) {
+    console.log(`\n[tier2] ${tier2Deferred} tier-2+ asset(s) deferred. Fill their templates with tier-1 ids via:`);
+    console.log(`[tier2]   node tools/fill-tier2-manifests.mjs --network ${opts.network}`);
+    console.log(`[tier2] Then re-run this command to inscribe the filled manifests.`);
+  }
 }
 
 function assetKey(asset) {
