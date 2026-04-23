@@ -1040,6 +1040,35 @@ function loadExtRamBuffer(extRamBuffer) {
     return false;
   }
 
+  // Crystal MBC3+TIMER+RAM+BATTERY traps in binjgb's
+  // _emulator_read_ext_ram path (same root cause as _emulator_write_ext_ram
+  // — MBC3 RTC register interaction). Observed 2026-04-23: switching
+  // manifests mid-session (default non-pokebells ROM → pokecrystal-pokebells
+  // ROM) triggered a WASM "memory access out of bounds" trap that killed
+  // the whole module; user had to delete IndexedDB + reload to recover.
+  //
+  // Fix: bypass binjgb's ext-ram API entirely on Crystal by driving the
+  // MBC3 bank-select + ram-enable registers ourselves via writeSramSnapshot
+  // (in capture-core.mjs). Same result as read_ext_ram (buffer bytes
+  // loaded into the cart's banked SRAM) but never trips the trap.
+  if (isCrystalRom()) {
+    if (extRamBuffer.byteLength !== SRAM_TOTAL_BYTE_LENGTH) {
+      log(`Stored Crystal SRAM size mismatch (${extRamBuffer.byteLength} bytes, expected ${SRAM_TOTAL_BYTE_LENGTH}); skipping restore.`, 'warn');
+      return false;
+    }
+    try {
+      writeSramSnapshot(
+        state.gb.writeByte,
+        state.gb.readByte,
+        new Uint8Array(extRamBuffer),
+      );
+      return true;
+    } catch (error) {
+      log(`Crystal-safe SRAM restore failed: ${error.message}; proceeding without save.`, 'warn');
+      return false;
+    }
+  }
+
   return withNewExtRamFileData((fileDataPtr, buffer) => {
     if (buffer.byteLength !== extRamBuffer.byteLength) {
       return false;
