@@ -738,14 +738,17 @@
       <div class="modal-actions">
         <button id="capture-handoff-cancel" data-danger="true">Cancel mint</button>
         <button id="capture-handoff-resume">Resume game</button>
-        <button id="capture-handoff-mint-direct" data-primary="true">Mint here (direct)</button>
-        <button id="capture-handoff-open">Copy JSON + open companion</button>
+        <!--
+          The "Mint here (direct)" button is staged in HTML + handler but
+          hidden until the v1.5 capture-producer refactor lands in shell.js
+          (next commit). Showing a button that surfaces "coming next" is
+          worse UX than hiding it entirely. Re-enable by removing the
+          `hidden` attributes once the pipeline is wired.
+        -->
+        <button id="capture-handoff-mint-direct" data-primary="true" hidden>Mint here (direct)</button>
+        <button id="capture-handoff-open" data-primary="true">Copy JSON + open companion</button>
       </div>
-      <p id="capture-handoff-mint-status" class="subline muted" style="margin-top:8px;"></p>
-      <p class="subline muted" style="margin-top:6px; font-size: 11px;">
-        <strong>Mint here</strong> signs via your wallet on this tab (no bellforge, no paste).
-        <strong>Copy + companion</strong> routes through bellforge.app for a richer UI.
-      </p>
+      <p id="capture-handoff-mint-status" class="subline muted" style="margin-top:8px;" hidden></p>
     </div>
   </div>
 

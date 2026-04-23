@@ -1,8 +1,8 @@
 # PokeBells Gen 2 Testnet Inscription Checklist
 
-Generated: 2026-04-22T03:34:09.727Z
-Assets total: 525
-Tier 1 known bytes: 2746593 (≈ 2.62 MB)
+Generated: 2026-04-23T04:05:18.767Z
+Assets total: 526
+Tier 1 known bytes: 3271485 (≈ 3.12 MB)
 
 ## Workflow
 
@@ -38,19 +38,20 @@ Tier 1 known bytes: 2746593 (≈ 2.62 MB)
 
 502 PNGs — one entry per dex × {normal, shiny}. Full list in `inscription-checklist.testnet.json`.
 
-### 1d. ES modules (7, 277202 bytes)
+### 1d. ES modules (8, 802094 bytes)
 
 **Inscribe each as `.txt`** (the Inscriber rejects `.js`/`.mjs`).
 
 | Key | Inscribe as | Bytes | sha256 | Source |
 |---|---|---|---|---|
-| `capture_core` | `capture_core.txt` | 32026 | `d632609ad434a0f8…` | `game/capture-core.mjs` |
+| `capture_core` | `capture_core.txt` | 86712 | `0c6ac4f38ad2ec9b…` | `game/capture-core.mjs` |
 | `gen2_species` | `gen2_species.txt` | 88346 | `e24c4574657c4249…` | `game/gen2-species.mjs` |
-| `gen2_pc_storage` | `gen2_pc_storage.txt` | 6181 | `ca32ddf122ebe013…` | `game/gen2-pc-storage.mjs` |
+| `gen2_pc_storage` | `gen2_pc_storage.txt` | 6605 | `ad403c244a7157f0…` | `game/gen2-pc-storage.mjs` |
 | `wallet_adapter` | `wallet_adapter.txt` | 22658 | `e99656ea84e506fb…` | `game/wallet-adapter.mjs` |
 | `signin_verify` | `signin_verify.txt` | 32220 | `4b8943e2585bc7de…` | `game/signin-verify.mjs` |
 | `pbrp_session_key` | `pbrp_session_key.txt` | 10017 | `d5c26054ee274bf2…` | `game/pbrp/session-key.mjs` |
-| `shell` | `shell.txt` | 85754 | `7f9935ff778b6c6b…` | `game/shell.js` |
+| `pokebells_inscriber` | `pokebells_inscriber.txt` | 423749 | `2655a1eaa7990492…` | `companion/pokebells/inscriber/pokebells-inscriber.browser.mjs` |
+| `shell` | `shell.txt` | 131787 | `e69617f71ab09d9c…` | `game/shell.js` |
 
 ## Tier 2 — Aggregate manifests (fill tier-1 ids first)
 
@@ -80,7 +81,7 @@ Tier 1 known bytes: 2746593 (≈ 2.62 MB)
 - Inscribe as: `pokebells-manifest.json`
 - Source template: `game/manifest.template.json`
 - Placeholder: `MAIN_MANIFEST_INSCRIPTION_ID`
-- Note: After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, shell, rom_manifest, collection) with real i0 strings, inscribe.
+- Note: After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest, collection) with real i0 strings, inscribe.
 
 ## Tier 4 — Root HTML
 

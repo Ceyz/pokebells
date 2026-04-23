@@ -9,6 +9,7 @@
   "wallet_adapter_inscription_id": "REPLACE_ME_wallet_adapter_es_module_i0",
   "signin_verify_inscription_id": "REPLACE_ME_signin_verify_es_module_i0",
   "pbrp_session_key_inscription_id": "REPLACE_ME_pbrp_session_key_es_module_i0",
+  "pokebells_inscriber_inscription_id": "REPLACE_ME_pokebells_inscriber_browser_bundle_i0",
   "shell_inscription_id": "REPLACE_ME_shell_es_module_i0",
   "rom_manifest_inscription_id": "REPLACE_ME_rom_chunks_manifest_i0",
   "collection_inscription_id": "REPLACE_ME_pokebells_collection_i0"

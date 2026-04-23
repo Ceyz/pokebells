@@ -317,6 +317,8 @@ const dom = {
     open: document.getElementById('capture-handoff-open'),
     resume: document.getElementById('capture-handoff-resume'),
     cancel: document.getElementById('capture-handoff-cancel'),
+    mintDirect: document.getElementById('capture-handoff-mint-direct'),
+    mintStatus: document.getElementById('capture-handoff-mint-status'),
   },
 };
 
@@ -3511,6 +3513,36 @@ dom.captureHandoffModal.open.addEventListener('click', () => {
       dom.captureHandoffModal.open.disabled = false;
     });
 });
+
+// "Mint here (direct)" — v1.5 client-side mint via window.nintondo +
+// pokebells-inscriber bundle. Two inscriptions (capture_commit + mint),
+// four wallet popups on P2PKH, zero paste. Falls back to the "Copy JSON
+// + open companion" path if the wallet isn't injected or the bundle
+// fails to load.
+//
+// FULL PIPELINE wiring lands in the next commit: refactors shell's
+// capture producer to emit v1.5 capture_commit + privateReveal (instead
+// of v1.4 capture), then drives the inscriber for both inscriptions +
+// POSTs to /api/captures + /api/mints on success.
+//
+// For now the handler surfaces a clear "coming next" status rather than
+// silently no-oping. Keeps the UI honest while we stage the refactor.
+if (dom.captureHandoffModal.mintDirect) {
+  dom.captureHandoffModal.mintDirect.addEventListener('click', () => {
+    const statusEl = dom.captureHandoffModal.mintStatus;
+    if (statusEl) {
+      statusEl.textContent =
+        'Direct mint pipeline lands in the next commit. For now, click '
+        + '"Copy JSON + open companion" — that route ships the same '
+        + 'inscription via bellforge without leaving your wallet.';
+      statusEl.className = 'subline warn';
+    }
+    log(
+      'Mint here: v1.5 pipeline not yet wired on this tab; use Copy JSON + open companion meanwhile',
+      'warn',
+    );
+  });
+}
 
 dom.captureHandoffModal.resume.addEventListener('click', () => {
   closeCaptureHandoff();

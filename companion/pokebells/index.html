@@ -291,10 +291,16 @@
     <h1>Welcome to PokeBells</h1>
     <p>A retro monster-catching game where every capture becomes an on-chain inscription on Bells. Sign in with your wallet, mint your Pokemon, and show them off.</p>
     <div class="hub-cards">
+      <a class="hub-card" id="hub-play-card" href="play-bridge.html"
+         target="_blank" rel="noopener" style="text-decoration:none; color:inherit;">
+        <div class="hub-card-icon">▶</div>
+        <div class="hub-card-title">Play Pokebells</div>
+        <p class="hub-card-desc">Boots the game in this tab via a wallet bridge — your wallet stays here, the game runs from its on-chain inscription. Capture, mint, and reveal happen end-to-end without leaving the page.</p>
+      </a>
       <button class="hub-card" data-goto="mint" type="button">
         <div class="hub-card-icon">⚡</div>
-        <div class="hub-card-title">Mint a capture</div>
-        <p class="hub-card-desc">Paste the capture JSON from the game, verify provenance, and inscribe on Bells.</p>
+        <div class="hub-card-title">Mint / Reveal (advanced)</div>
+        <p class="hub-card-desc">Paste a capture JSON from a separate game tab and inscribe it manually. Fallback for power users; the Play card above is the canonical flow.</p>
       </button>
       <button class="hub-card" data-goto="trainer" type="button">
         <div class="hub-card-icon">🧑</div>
@@ -304,12 +310,12 @@
       <div class="hub-card soon">
         <div class="hub-card-icon">📘</div>
         <div class="hub-card-title">Pokedex</div>
-        <p class="hub-card-desc">Browse every capture minted on Bells. Needs our indexer — coming soon.</p>
+        <p class="hub-card-desc">Browse every Pokemon minted on Bells. Needs our indexer — coming soon.</p>
       </div>
       <div class="hub-card soon">
         <div class="hub-card-icon">🏆</div>
         <div class="hub-card-title">Leaderboard</div>
-        <p class="hub-card-desc">Top trainers by captures, by IV totals, by shinies. Coming soon.</p>
+        <p class="hub-card-desc">Top trainers by Pokemon count, IV totals, and shinies. Coming soon.</p>
       </div>
     </div>
   </div>

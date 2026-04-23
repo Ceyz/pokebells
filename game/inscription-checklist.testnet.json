@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-04-22T03:34:09.721Z",
+  "generatedAt": "2026-04-23T04:05:18.762Z",
   "network": "bells-testnet",
-  "assetCount": 525,
-  "tier1KnownBytes": 2746593,
+  "assetCount": 526,
+  "tier1KnownBytes": 3271485,
   "notes": [
     "Inscribe in tier order (1 → 4). Inside tier 1 the order doesn't matter.",
     "Nintondo Inscriber rejects .js/.mjs uploads → inscribe ES modules as .txt.",
@@ -5657,8 +5657,8 @@
       "inscribeAs": "capture_core.txt",
       "contentType": "text/plain",
       "file": "game/capture-core.mjs",
-      "bytes": 32026,
-      "sha256": "d632609ad434a0f87301e73475c566312a68e0f8944ce5b029c53d2a69853eba",
+      "bytes": 86712,
+      "sha256": "0c6ac4f38ad2ec9b487f1b1b9bd36ad2e5c8018302f7e18b4a5f01230100d162",
       "dependsOn": [],
       "placeholder": "CAPTURE_CORE_INSCRIPTION_ID"
     },
@@ -5679,8 +5679,8 @@
       "inscribeAs": "gen2_pc_storage.txt",
       "contentType": "text/plain",
       "file": "game/gen2-pc-storage.mjs",
-      "bytes": 6181,
-      "sha256": "ca32ddf122ebe01305bf1969dee9bb17f6cc5704b4f02a17d81ee4a5e440c9ae",
+      "bytes": 6605,
+      "sha256": "ad403c244a7157f01dd5aec8c66710677964e5a2b511a9a9c2fba8fe42bc30ed",
       "dependsOn": [],
       "placeholder": "GEN2_PC_STORAGE_INSCRIPTION_ID"
     },
@@ -5719,12 +5719,23 @@
     },
     {
       "role": "es-module",
+      "key": "pokebells_inscriber",
+      "inscribeAs": "pokebells_inscriber.txt",
+      "contentType": "text/plain",
+      "file": "companion/pokebells/inscriber/pokebells-inscriber.browser.mjs",
+      "bytes": 423749,
+      "sha256": "2655a1eaa7990492e3ef09a05d8de9f7634341bdec302e6f3ab42d315bd5191f",
+      "dependsOn": [],
+      "placeholder": "POKEBELLS_INSCRIBER_INSCRIPTION_ID"
+    },
+    {
+      "role": "es-module",
       "key": "shell",
       "inscribeAs": "shell.txt",
       "contentType": "text/plain",
       "file": "game/shell.js",
-      "bytes": 85754,
-      "sha256": "7f9935ff778b6c6b8a49f8997337ac4f073b16f19dc34f98f2dbf50dbec02cb8",
+      "bytes": 131787,
+      "sha256": "e69617f71ab09d9c8abd3952a79868473d89e2cbc24d0bb32e52223f0f24c4f6",
       "dependsOn": [],
       "placeholder": "SHELL_INSCRIPTION_ID"
     },
@@ -5782,7 +5793,7 @@
         "collection-metadata"
       ],
       "placeholder": "MAIN_MANIFEST_INSCRIPTION_ID",
-      "note": "After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, shell, rom_manifest, collection) with real i0 strings, inscribe."
+      "note": "After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest, collection) with real i0 strings, inscribe."
     },
     {
       "role": "root-html",

@@ -56,9 +56,21 @@ const LOCAL_MODULE_PATHS = Object.freeze({
   wallet_adapter: './wallet-adapter.mjs',
   signin_verify: './signin-verify.mjs',
   pbrp_session_key: './pbrp/session-key.mjs',
+  // Client-side ordinals PSBT builder (fork of bells-inscriber@0.2.8 with
+  // the Nintondo service-fee output stripped). shell.js loads it lazily
+  // when the user clicks "Mint here (direct)" so the wallet can sign +
+  // broadcast capture_commit + mint without going through the Nintondo
+  // Inscriber UI. The on-chain inscription bundles src/index.mjs +
+  // belcoinjs-lib + Buffer polyfill into a single ESM blob — see
+  // companion/pokebells/inscriber/pokebells-inscriber.browser.mjs.
+  pokebells_inscriber: '../companion/pokebells/inscriber/pokebells-inscriber.browser.mjs',
   shell: './shell.js',
 });
 
+// Eager-loaded modules (await imported at boot, in order). The inscriber
+// bundle is intentionally excluded — it's 660 KB and only needed when
+// the user clicks "Mint here". shell.js dynamically imports it via
+// window.PokeBellsBoot.resolveModuleUrl('pokebells_inscriber') on demand.
 const MODULE_LOAD_ORDER = Object.freeze([
   'capture_core',
   'gen2_species',
@@ -263,6 +275,20 @@ async function boot() {
     await importModule(key, url);
     console.info('[boot] loaded', key, url);
   }
+
+  // Expose the resolver so shell.js can lazy-import non-critical modules
+  // (e.g. pokebells_inscriber, ~660 KB, only needed at Mint-click time)
+  // via the same network/mode resolution path used at boot.
+  window.PokeBellsBoot = Object.freeze({
+    network,
+    mode,
+    contentBase,
+    manifest,
+    resolveModuleUrl(key) {
+      return resolveModuleUrl(mode, contentBase, manifest, key);
+    },
+    importModule,
+  });
 
   // shell.js runs immediately on evaluation — it expects window.PokeBells*
   // globals to already be populated by the earlier imports. Load it last.

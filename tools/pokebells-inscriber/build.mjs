@@ -26,8 +26,13 @@ await build({
   format: "esm",
   platform: "browser",
   target: ["es2022"],
-  minify: false,
+  // Minify for on-chain inscription size budget. Bells per-inscription
+  // soft limit is ~400 KB (mirrors Bitcoin ord); minified bundle should
+  // land well under. Sourcemap stays for local devtools but doesn't ship
+  // on-chain — the inscription contains only the .mjs body.
+  minify: true,
   sourcemap: true,
+  legalComments: "none",
   // inject bundles the shim and rewrites bare `Buffer` identifiers to import
   // from it. The shim also sets globalThis.Buffer as a side effect.
   inject: [resolve(here, "src/buffer-shim.mjs")],
