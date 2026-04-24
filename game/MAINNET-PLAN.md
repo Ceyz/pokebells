@@ -83,6 +83,23 @@ requires another review round.
      Nintondo electrs filters UTXOs ≤ 1000 sats from the address
      endpoint, so Phase B tooling + indexer must track satpoints
      independently (see ROOT-APP-DESIGN.md "Phase 0 findings").
+   - **Phase C shipped 2026-04-24 — boot.js discovery**:
+     `game/boot.js` adds `DEFAULT_*_COLLECTION_ID` +
+     `DEFAULT_*_INDEXER_URL` baked constants + an async
+     `resolveAppManifestId(network, contentBase)` that walks the
+     4-tier chain (URL param > indexer `/api/collection/latest` >
+     raw collection inscription > baked manifest) with a 2 s timeout
+     per remote tier + fail-open at every step. Discovery trace
+     surfaces on `window.PokeBellsBoot.discovery` for devtools /
+     Settings tab. `tools/bulk-inscribe.mjs` `fillRootHtml`
+     substitutes the collection placeholder before the manifest
+     placeholder (longest-prefix-first, since
+     `REPLACE_ME_BEFORE_*_MINT` is a prefix of
+     `REPLACE_ME_BEFORE_*_MINT_COLLECTION`). When the collection
+     isn't yet inscribed, the placeholder stays in place and
+     discovery skips tiers 2 + 3 gracefully — boot falls open to
+     the baked manifest, preserving existing pre-collection
+     behavior.
    - **Phase B shipped 2026-04-24 (core logic, no worker wiring yet)**:
      - Schema: `collections`, `collection_updates`, `rejected_updates`
        tables in `game/indexer/schema.sql`.

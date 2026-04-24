@@ -495,6 +495,31 @@ function fillRootHtml(asset, progress, network) {
       unresolved: [`boot.js is missing the ${placeholder} placeholder — cannot bake default manifest id`],
     };
   }
+  // Must be BEFORE the manifest-id substitution because the manifest
+  // placeholder is a prefix of the collection placeholder
+  // ("REPLACE_ME_BEFORE_MAINNET_MINT" vs
+  // "REPLACE_ME_BEFORE_MAINNET_MINT_COLLECTION"). Substituting the
+  // shorter string first would corrupt the longer one.
+  const collectionPlaceholder = network === "bells-mainnet"
+    ? "REPLACE_ME_BEFORE_MAINNET_MINT_COLLECTION"
+    : "REPLACE_ME_BEFORE_TESTNET_MINT_COLLECTION";
+  const collectionEntry = progress.inscriptions["collection-metadata:pokebells-collection.json"];
+  if (boot.includes(collectionPlaceholder)) {
+    if (collectionEntry?.inscription_id) {
+      boot = boot.split(collectionPlaceholder).join(collectionEntry.inscription_id);
+    } else {
+      // Leave the placeholder in place. Phase C discovery code handles
+      // this gracefully (tiers 2 + 3 skip "no_baked_collection_id" +
+      // fall through to the baked manifest id). Not a blocker, just a
+      // note so the operator knows discovery is partially disabled.
+      console.warn(
+        `[bulk-inscribe] ${collectionPlaceholder} still in boot.js `
+        + `(collection-metadata:pokebells-collection.json not inscribed yet). `
+        + `Discovery tiers 2 + 3 will skip; boot will fall back to `
+        + `the baked manifest id only.`,
+      );
+    }
+  }
   boot = boot.split(placeholder).join(mainId);
 
   let html = fs.readFileSync(htmlPath, "utf8");

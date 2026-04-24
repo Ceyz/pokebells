@@ -550,17 +550,52 @@ check refuses anything that doesn't spend the expected satpoint,
 mainnet fails closed when electrs is unavailable. Integration with
 live chain is the remaining worker-route work.
 
-**Phase C — boot.js collection-aware discovery.**
-- Bake `DEFAULT_*_COLLECTION_ID` alongside `DEFAULT_*_MANIFEST_ID`
-  in boot.js.
-- Implement the 4-tier shell resolution chain (URL > indexer >
-  raw collection > baked; localStorage only as validated cache).
-- 2 s timeout + fail-open at every shell tier.
-- Expose the resolved path via `window.PokeBellsBoot.discovery` for
-  debugging.
-- Acceptance: an out-of-date baked manifest is transparently
-  replaced when a newer `app_manifest_ids[0]` is available;
-  offline / indexer-down boot still works with baked defaults.
+**Phase C — boot.js collection-aware discovery. SHIPPED 2026-04-24.**
+
+- `DEFAULT_MAINNET_COLLECTION_ID` + `DEFAULT_TESTNET_COLLECTION_ID`
+  baked in `game/boot.js` (placeholders until the initial
+  collection root is inscribed). `DEFAULT_MAINNET_INDEXER_URL` +
+  `DEFAULT_TESTNET_INDEXER_URL` baked (testnet = live Worker URL,
+  mainnet placeholder until mainnet Worker is deployed).
+- Async `resolveAppManifestId(network, contentBase)` walks the
+  4-tier chain with `fetchJsonWithTimeout(url, 2000)` at every
+  remote tier. localStorage is NOT in the chain (stays demoted to
+  validated cache per the Discovery section above).
+- Each tier records `{ source, value, url?, error?, skipped? }`
+  in the `discovery` trace. The caller gets
+  `{ manifestId, source, discovery }` back.
+- `boot()` awaits the resolver in inscription mode, logs the
+  discovery summary (`resolved_from`, `tried` count), then uses
+  the resolved `manifestId` as the existing
+  `fetchManifest(manifestId, contentBase)` target. Local-dev
+  mode is unchanged — discovery is null there.
+- `window.PokeBellsBoot.discovery` carries the trace for devtools
+  + Settings tab (post-launch UI).
+- `tools/bulk-inscribe.mjs` `fillRootHtml` now substitutes the
+  `REPLACE_ME_BEFORE_*_MINT_COLLECTION` placeholder when the
+  `collection-metadata:pokebells-collection.json` progress entry
+  exists. Longest-prefix-first to avoid clobbering the collection
+  placeholder with a partial manifest substitution. When the
+  collection isn't yet inscribed, the placeholder stays in place
+  and discovery silently skips tiers 2 + 3 via the
+  `canUseCollection = INSCRIPTION_ID_RE.test(collectionId)` check.
+
+### Phase C fail-open matrix (tested via code review; full testnet
+integration is the remaining end-to-end validation)
+
+| Failure                          | Result                         |
+|----------------------------------|--------------------------------|
+| URL param malformed              | Trace `skipped:"malformed"`; tier 2 takes over. |
+| Indexer 5xx / offline / timeout  | Trace `error:"..."`; tier 3 takes over. |
+| Indexer returns `app_manifest_ids: []` | Trace `skipped:"no_app_manifest_ids_in_response"`; tier 3 takes over. |
+| Content host offline             | Trace `error:"..."`; tier 4 (baked) takes over. |
+| Collection inscription pre-mint (placeholder) | Trace `skipped:"no_baked_collection_id"` for tiers 2 + 3; tier 4 (baked) takes over. |
+| Total network outage             | All tiers fail but baked default always returns.  |
+
+Acceptance met: an out-of-date baked manifest is replaced when a
+newer `app_manifest_ids[0]` is available via indexer or raw
+collection; offline / indexer-down boot still works with baked
+defaults; every tier trace is captured for devtools inspection.
 
 **Phase D — shell.js tab split (P1, not a mainnet blocker).**
 - Extract Trainer / Pokedex / Leaderboard / Pending / Settings from

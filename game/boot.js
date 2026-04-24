@@ -36,6 +36,30 @@
 const DEFAULT_MAINNET_MANIFEST_ID = 'REPLACE_ME_BEFORE_MAINNET_MINT';
 const DEFAULT_TESTNET_MANIFEST_ID = 'REPLACE_ME_BEFORE_TESTNET_MINT';
 
+// Phase C — discovery defaults. Baked so boot can locate the current
+// app manifest via the p:pokebells-collection + op:"collection_update"
+// indirection WITHOUT needing to fetch anything just to find the
+// indexer (see ROOT-APP-DESIGN.md "Bootstrap").
+//
+// Collection ids are placeholders until the initial collection root is
+// inscribed (per the mint choreography: manifest → collection → root →
+// first collection_update). When still placeholder, tiers 2/3 are
+// skipped and boot falls open to the baked DEFAULT_*_MANIFEST_ID.
+const DEFAULT_MAINNET_COLLECTION_ID = 'REPLACE_ME_BEFORE_MAINNET_MINT_COLLECTION';
+const DEFAULT_TESTNET_COLLECTION_ID = 'REPLACE_ME_BEFORE_TESTNET_MINT_COLLECTION';
+
+// Indexer base URL — the Phase B /api/collection/latest endpoint lives
+// here. Testnet is the already-deployed Worker; mainnet is a placeholder
+// until the production Worker is deployed. When the URL looks like a
+// REPLACE_ placeholder, tier 2 is skipped.
+const DEFAULT_MAINNET_INDEXER_URL = 'REPLACE_ME_BEFORE_MAINNET_MINT_INDEXER';
+const DEFAULT_TESTNET_INDEXER_URL = 'https://pokebells-indexer.ceyzcrypto.workers.dev';
+
+// 2 s per tier (indexer + raw collection). Boot falls open to the next
+// tier on timeout, so total worst-case added latency is ~4 s before
+// falling back to the baked default.
+const COLLECTION_FETCH_TIMEOUT_MS = 2000;
+
 // Nintondo serves inscription bytes (JSON, JS, binary) at these origins.
 // `/content/<id>` returns the raw inscription body with the correct MIME —
 // this is what dynamic import() and manifest fetch need. `/html/<id>` is a
@@ -112,10 +136,130 @@ function detectMode() {
 }
 
 function resolveManifestId(network) {
+  // Synchronous fallback used only as the baseline before the async
+  // discovery chain runs. Kept for call sites that want a cheap value
+  // without awaiting. The async path (resolveAppManifestId) is the
+  // source of truth for boot().
   const params = new URLSearchParams(window.location.search);
   const explicit = params.get('manifest');
   if (explicit) return explicit.trim();
   return network === 'bells-testnet' ? DEFAULT_TESTNET_MANIFEST_ID : DEFAULT_MAINNET_MANIFEST_ID;
+}
+
+// Phase C — async 4-tier app-manifest-id discovery chain.
+// See game/ROOT-APP-DESIGN.md "Discovery" section for the full spec.
+// Priority order (first match wins; fail-open to next tier on error
+// or timeout so offline / indexer-down boot always succeeds):
+//   1. ?manifest=<id>      — explicit per-session override (power-user).
+//   2. indexer /api/collection/latest → aggregated.app_manifest_ids[0]
+//      (Phase B endpoint; 2 s timeout).
+//   3. raw p:pokebells-collection inscription body →
+//      app_manifest_ids[0] (fallback when indexer is down but the
+//      content host still works; 2 s timeout).
+//   4. baked DEFAULT_*_MANIFEST_ID — always works, no network needed.
+//
+// Returns { manifestId, source, discovery }. `discovery` is the full
+// trace (every tier tried + outcome) surfaced on
+// window.PokeBellsBoot.discovery so devtools + the Settings tab can
+// show which tier answered.
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { cache: 'no-cache', signal: controller.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveAppManifestId(network, contentBase) {
+  const discovery = { network, tried: [], resolved_from: null, resolved_id: null };
+  const trace = (source, outcome) => {
+    discovery.tried.push({ source, ...outcome });
+  };
+  const resolveTo = (source, manifestId) => {
+    discovery.resolved_from = source;
+    discovery.resolved_id = manifestId;
+    return { manifestId, source, discovery };
+  };
+
+  // Tier 1: URL param. Malformed values fall through to tier 2 rather
+  // than erroring — a typo in `?manifest=` should land on a working
+  // manifest via discovery, not a dead page.
+  const params = new URLSearchParams(window.location.search);
+  const explicit = params.get('manifest');
+  if (explicit) {
+    const id = explicit.trim();
+    if (INSCRIPTION_ID_RE.test(id)) {
+      trace('url_param', { value: id });
+      return resolveTo('url_param', id);
+    }
+    trace('url_param', { skipped: 'malformed', value: explicit });
+  }
+
+  const collectionId = network === 'bells-testnet'
+    ? DEFAULT_TESTNET_COLLECTION_ID
+    : DEFAULT_MAINNET_COLLECTION_ID;
+  const bakedManifestId = network === 'bells-testnet'
+    ? DEFAULT_TESTNET_MANIFEST_ID
+    : DEFAULT_MAINNET_MANIFEST_ID;
+  const indexerBase = network === 'bells-testnet'
+    ? DEFAULT_TESTNET_INDEXER_URL
+    : DEFAULT_MAINNET_INDEXER_URL;
+  const canUseCollection = INSCRIPTION_ID_RE.test(collectionId);
+  const canUseIndexer = typeof indexerBase === 'string'
+    && /^https?:\/\//i.test(indexerBase);
+
+  // Tier 2: indexer aggregated view.
+  if (canUseCollection && canUseIndexer) {
+    const url = `${indexerBase.replace(/\/$/, '')}/api/collection/latest`
+      + `?id=${encodeURIComponent(collectionId)}`
+      + `&network=${encodeURIComponent(network)}`;
+    try {
+      const body = await fetchJsonWithTimeout(url, COLLECTION_FETCH_TIMEOUT_MS);
+      const first = body?.aggregated?.app_manifest_ids?.[0];
+      if (typeof first === 'string' && INSCRIPTION_ID_RE.test(first)) {
+        trace('indexer', { value: first, url });
+        return resolveTo('indexer', first);
+      }
+      trace('indexer', { skipped: 'no_app_manifest_ids_in_response', url });
+    } catch (e) {
+      trace('indexer', { error: e?.message ?? String(e), url });
+    }
+  } else {
+    trace('indexer', {
+      skipped: !canUseCollection ? 'no_baked_collection_id' : 'no_baked_indexer_url',
+    });
+  }
+
+  // Tier 3: raw collection inscription via content host.
+  if (canUseCollection && contentBase) {
+    const url = `${contentBase}${collectionId}`;
+    try {
+      const body = await fetchJsonWithTimeout(url, COLLECTION_FETCH_TIMEOUT_MS);
+      const first = body?.app_manifest_ids?.[0];
+      if (typeof first === 'string' && INSCRIPTION_ID_RE.test(first)) {
+        trace('raw_collection', { value: first, url });
+        return resolveTo('raw_collection', first);
+      }
+      trace('raw_collection', { skipped: 'no_app_manifest_ids_in_body', url });
+    } catch (e) {
+      trace('raw_collection', { error: e?.message ?? String(e), url });
+    }
+  } else {
+    trace('raw_collection', {
+      skipped: !canUseCollection ? 'no_baked_collection_id' : 'no_content_base',
+    });
+  }
+
+  // Tier 4: baked default. Always present. assertValidInscriptionId
+  // in the caller will still throw if the placeholder is still in
+  // place — same pre-mint error as today.
+  trace('baked_default', { value: bakedManifestId });
+  return resolveTo('baked_default', bakedManifestId);
 }
 
 function assertValidInscriptionId(value, label) {
@@ -342,10 +486,24 @@ async function boot() {
   }
 
   let manifest = null;
+  let discovery = null;
   if (mode === 'inscription') {
-    const manifestId = resolveManifestId(network);
-    manifest = await fetchManifest(manifestId, contentBase);
-    console.info('[boot] inscription mode', { network, manifestId, manifestVersion: manifest.v });
+    // Phase C: async 4-tier app-manifest-id discovery. Falls open to
+    // the baked default on any failure, so a down indexer / offline
+    // content host never blocks boot.
+    const resolved = await resolveAppManifestId(network, contentBase);
+    discovery = resolved.discovery;
+    console.info('[boot] app manifest discovery', {
+      resolved_from: resolved.source,
+      manifest_id: resolved.manifestId,
+      tried: discovery.tried.length,
+    });
+    manifest = await fetchManifest(resolved.manifestId, contentBase);
+    console.info('[boot] inscription mode', {
+      network,
+      manifestId: resolved.manifestId,
+      manifestVersion: manifest.v,
+    });
   } else {
     console.info('[boot] local dev mode — relative module paths');
   }
@@ -369,6 +527,11 @@ async function boot() {
     mode,
     contentBase,
     manifest,
+    // Phase C — full discovery trace (tier chain + which one answered).
+    // null in local-dev mode, always populated in inscription mode.
+    // Settings UI can render this to show users/operators which
+    // manifest is live + how it was found.
+    discovery,
     resolveModuleUrl(key) {
       return resolveModuleUrl(mode, contentBase, manifest, key);
     },
