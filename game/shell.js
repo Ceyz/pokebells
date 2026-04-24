@@ -5064,6 +5064,57 @@ refreshWalletView().catch((error) => {
 });
 refreshPokeballStatus().catch(() => {});
 
+// Multi-tab guard. Two tabs on the same origin share IndexedDB, which
+// means a parallel emulator write to SRAM or pendingCaptures can
+// silently corrupt the other tab's save. Users have hit this at least
+// once ("j'ai lancé deux onglets en meme temps"). Detect other live
+// tabs via BroadcastChannel and show a dismissable warning banner.
+// Lightweight: no heartbeats, no locks, just a hello/ack ping at boot.
+(function installMultiTabGuard() {
+  if (typeof BroadcastChannel === 'undefined') return;
+  let channel;
+  try { channel = new BroadcastChannel('pokebells-tabs'); }
+  catch { return; }
+  let otherTabs = 0;
+  let banner = null;
+  function showBanner() {
+    if (banner) return;
+    banner = document.createElement('div');
+    banner.setAttribute('role', 'alert');
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99998;'
+      + 'padding:10px 14px;background:#b45a00;color:#fff;'
+      + 'font:13px/1.4 system-ui,sans-serif;display:flex;gap:10px;'
+      + 'align-items:center;justify-content:center;';
+    banner.innerHTML = '<strong>⚠ Another PokeBells tab is already open.</strong>'
+      + ' Playing in two tabs at once can corrupt your save (last-write-wins on'
+      + ' IndexedDB). Close one of them.'
+      + ' <button style="margin-left:10px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:3px 9px;border-radius:4px;cursor:pointer;font-size:12px;">Dismiss</button>';
+    banner.querySelector('button').addEventListener('click', () => {
+      banner.remove();
+      banner = null;
+    });
+    document.body.prepend(banner);
+  }
+  channel.onmessage = (ev) => {
+    const t = ev.data?.type;
+    if (t === 'hi') {
+      // A new tab announced itself. We were here first — tell them.
+      channel.postMessage({ type: 'already-here' });
+    } else if (t === 'already-here') {
+      otherTabs += 1;
+      showBanner();
+    } else if (t === 'bye') {
+      otherTabs = Math.max(0, otherTabs - 1);
+      if (otherTabs === 0 && banner) { banner.remove(); banner = null; }
+    }
+  };
+  // Announce ourselves. Existing tabs respond with 'already-here'.
+  channel.postMessage({ type: 'hi' });
+  window.addEventListener('beforeunload', () => {
+    try { channel.postMessage({ type: 'bye' }); channel.close(); } catch {}
+  });
+})();
+
 // When boot.js is in inscription mode and the main-manifest advertises a
 // rom_manifest_inscription_id, point the Manifest URL input at the
 // on-chain rom-manifest content URL by default instead of the local-dev
