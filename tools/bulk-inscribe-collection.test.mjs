@@ -21,7 +21,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { fillCollectionMetadata } from "./bulk-inscribe.mjs";
+import { fillCollectionMetadata, fillRootHtml } from "./bulk-inscribe.mjs";
 import { validateCollection } from "../game/indexer/src/validator.js";
 
 const FAKE_MANIFEST_ID = `${"a".repeat(64)}i0`;
@@ -74,6 +74,55 @@ test("fillCollectionMetadata: template without the placeholder -> clear unresolv
   );
   assert.equal(result.text, "");
   assert.match(result.unresolved[0], /does not contain the expected placeholder/);
+});
+
+test("fillRootHtml: refuses to emit root when collection-metadata is missing from progress", () => {
+  // Phase C round-5 hard gate: fillRootHtml must NOT silently bake
+  // a REPLACE_ collection placeholder into a permanent root
+  // inscription. If the checklist runner ever reaches root-html
+  // before collection-metadata (e.g. a bug in topological order),
+  // the resulting root would forever disable Phase C discovery.
+  // Refusing at template-fill time is the defense-in-depth.
+  const progress = {
+    inscriptions: {
+      "main-manifest:pokebells-manifest.json": { inscription_id: FAKE_MANIFEST_ID },
+      // collection-metadata deliberately NOT present.
+    },
+  };
+  const result = fillRootHtml(
+    { file: "game/index.html" },
+    progress,
+    "bells-testnet",
+  );
+  assert.equal(result.text, "");
+  assert.equal(result.replaced, 0);
+  assert.match(
+    result.unresolved[0],
+    /root-html requires collection-metadata.*not in progress yet/,
+  );
+});
+
+test("fillRootHtml: happy path with both manifest + collection in progress", () => {
+  const COLLECTION_ID = `${"c".repeat(64)}i0`;
+  const progress = {
+    inscriptions: {
+      "main-manifest:pokebells-manifest.json": { inscription_id: FAKE_MANIFEST_ID },
+      "collection-metadata:pokebells-collection.json": { inscription_id: COLLECTION_ID },
+    },
+  };
+  const result = fillRootHtml(
+    { file: "game/index.html" },
+    progress,
+    "bells-testnet",
+  );
+  assert.equal(result.unresolved.length, 0, JSON.stringify(result.unresolved));
+  assert.equal(result.replaced, 1);
+  // Both ids must have landed in the output.
+  assert.ok(result.text.includes(FAKE_MANIFEST_ID), "manifest id missing from filled root");
+  assert.ok(result.text.includes(COLLECTION_ID), "collection id missing from filled root");
+  // Placeholders must be gone.
+  assert.ok(!result.text.includes("REPLACE_ME_BEFORE_TESTNET_MINT_COLLECTION"));
+  assert.ok(!result.text.includes("REPLACE_ME_BEFORE_TESTNET_MINT\""), "manifest placeholder string survived");
 });
 
 test("manifest.template.json: no longer carries collection_inscription_id (dead field removed)", async () => {

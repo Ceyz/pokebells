@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-24T15:20:50.115Z",
+  "generatedAt": "2026-04-24T15:39:41.989Z",
   "network": "bells-testnet",
   "assetCount": 529,
   "tier1KnownBytes": 3353399,
@@ -5793,19 +5793,6 @@
       "note": "After tier 1 sprites: fill in every sprite id, inscribe."
     },
     {
-      "role": "collection-metadata",
-      "inscribeAs": "pokebells-collection.json",
-      "contentType": "application/json",
-      "file": "game/collection.template.json",
-      "bytes": null,
-      "sha256": null,
-      "dependsOn": [
-        "main-manifest"
-      ],
-      "placeholder": null,
-      "note": "Tier 2b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing."
-    },
-    {
       "role": "rom-manifest",
       "inscribeAs": "pokecrystal-rom.json",
       "contentType": "application/json",
@@ -5835,6 +5822,19 @@
       ],
       "placeholder": "MAIN_MANIFEST_INSCRIPTION_ID",
       "note": "After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest) with real i0 strings, inscribe. The collection id is NOT in the manifest (Phase C: the pointer goes collection→manifest, not manifest→collection)."
+    },
+    {
+      "role": "collection-metadata",
+      "inscribeAs": "pokebells-collection.json",
+      "contentType": "application/json",
+      "file": "game/collection.template.json",
+      "bytes": null,
+      "sha256": null,
+      "dependsOn": [
+        "main-manifest"
+      ],
+      "placeholder": null,
+      "note": "Tier 3b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing."
     },
     {
       "role": "root-html",

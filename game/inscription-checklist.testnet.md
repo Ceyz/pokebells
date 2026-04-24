@@ -1,6 +1,6 @@
 # PokeBells Gen 2 Testnet Inscription Checklist
 
-Generated: 2026-04-24T15:20:50.121Z
+Generated: 2026-04-24T15:39:41.997Z
 Assets total: 529
 Tier 1 known bytes: 3353399 (≈ 3.20 MB)
 
@@ -62,19 +62,19 @@ Tier 1 known bytes: 3353399 (≈ 3.20 MB)
 - Placeholder: `SPRITE_PACK_INSCRIPTION_ID`
 - Note: After tier 1 sprites: fill in every sprite id, inscribe.
 
-### collection-metadata
-
-- Inscribe as: `pokebells-collection.json`
-- Source template: `game/collection.template.json`
-- Placeholder: `null`
-- Note: Tier 2b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing.
-
 ### rom-manifest
 
 - Inscribe as: `pokecrystal-rom.json`
 - Source template: `game/manifest.pokebells-testnet-template.json`
 - Placeholder: `ROM_MANIFEST_INSCRIPTION_ID`
 - Note: After tier 1 + sprite-pack: fill every ROM_CHUNK_* + BINJGB_* + SPRITE_PACK_INSCRIPTION_ID, inscribe.
+
+### collection-metadata
+
+- Inscribe as: `pokebells-collection.json`
+- Source template: `game/collection.template.json`
+- Placeholder: `null`
+- Note: Tier 3b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing.
 
 ## Tier 3 — Main bootloader manifest
 

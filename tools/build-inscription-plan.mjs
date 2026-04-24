@@ -200,29 +200,6 @@ async function main() {
   });
 
   assets.push({
-    role: 'collection-metadata',
-    inscribeAs: 'pokebells-collection.json',
-    contentType: 'application/json',
-    file: 'game/collection.template.json',
-    bytes: null,
-    sha256: null,
-    // Mint choreography: manifest FIRST, then collection with
-    // app_manifest_ids=[<manifest-id>]. Reversed from the prior cycle
-    // (manifest depended on collection), which made the first
-    // collection ingest-incompatible (strict Phase A validator
-    // rejects REPLACE_ placeholders). See game/ROOT-APP-DESIGN.md
-    // "Mint choreography" and "Phase A ingestion hardening".
-    dependsOn: ['main-manifest'],
-    // No asset.placeholder — the main manifest no longer carries
-    // collection_inscription_id (Phase C: the reverse pointer, from
-    // collection to manifest, is the canonical direction). root-html
-    // references the collection id directly via fillRootHtml, not via
-    // generic placeholder substitution.
-    placeholder: null,
-    note: 'Tier 2b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing.',
-  });
-
-  assets.push({
     role: 'rom-manifest',
     inscribeAs: 'pokecrystal-rom.json',
     contentType: 'application/json',
@@ -252,6 +229,30 @@ async function main() {
     ],
     placeholder: 'MAIN_MANIFEST_INSCRIPTION_ID',
     note: 'After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest) with real i0 strings, inscribe. The collection id is NOT in the manifest (Phase C: the pointer goes collection→manifest, not manifest→collection).',
+  });
+
+  // ---- Tier 3b: collection metadata ----
+  // Emitted AFTER main-manifest so a single bulk-inscribe pass fills
+  // app_manifest_ids[0] with the freshly-inscribed manifest id. Earlier
+  // layout put this in tier 2 (before main-manifest), which guaranteed
+  // the collection body shipped with a REPLACE_ placeholder and got
+  // rejected by the strict Phase A validator on the first POST
+  // /api/collections. See game/ROOT-APP-DESIGN.md "Mint choreography".
+  assets.push({
+    role: 'collection-metadata',
+    inscribeAs: 'pokebells-collection.json',
+    contentType: 'application/json',
+    file: 'game/collection.template.json',
+    bytes: null,
+    sha256: null,
+    dependsOn: ['main-manifest'],
+    // No asset.placeholder — the main manifest no longer carries
+    // collection_inscription_id (Phase C: the reverse pointer, from
+    // collection to manifest, is the canonical direction). root-html
+    // references the collection id directly via fillRootHtml, not via
+    // generic placeholder substitution.
+    placeholder: null,
+    note: 'Tier 3b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing.',
   });
 
   // ---- Tier 4: root HTML (bootloader) ----

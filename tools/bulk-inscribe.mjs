@@ -478,7 +478,7 @@ function fillTier2FromProgress(asset, checklist, progress, network) {
 // loads the game without any off-chain dependency (aside from the Nintondo
 // content host itself). The baked default means `?manifest=` URL param is
 // optional; pass one to override for testing a new manifest revision.
-function fillRootHtml(asset, progress, network) {
+export function fillRootHtml(asset, progress, network) {
   const htmlPath = path.resolve(REPO_ROOT, asset.file);  // game/index.html
   const bootPath = path.resolve(REPO_ROOT, "game/boot.js");
   const mainManifestEntry = progress.inscriptions["main-manifest:pokebells-manifest.json"];
@@ -503,25 +503,34 @@ function fillRootHtml(asset, progress, network) {
   // ("REPLACE_ME_BEFORE_MAINNET_MINT" vs
   // "REPLACE_ME_BEFORE_MAINNET_MINT_COLLECTION"). Substituting the
   // shorter string first would corrupt the longer one.
+  //
+  // HARD GATE (Phase C round-5 finding): the collection id MUST be
+  // present. If we let the placeholder survive into the minted root,
+  // that root is permanently broken for Phase C discovery (the
+  // inscription bytes are immutable; the baked placeholder can never
+  // be replaced). Refuse to emit a root that would be born missing
+  // its collection binding. The checklist now declares root-html
+  // dependsOn collection-metadata; this is the defense-in-depth.
   const collectionPlaceholder = network === "bells-mainnet"
     ? "REPLACE_ME_BEFORE_MAINNET_MINT_COLLECTION"
     : "REPLACE_ME_BEFORE_TESTNET_MINT_COLLECTION";
   const collectionEntry = progress.inscriptions["collection-metadata:pokebells-collection.json"];
   if (boot.includes(collectionPlaceholder)) {
-    if (collectionEntry?.inscription_id) {
-      boot = boot.split(collectionPlaceholder).join(collectionEntry.inscription_id);
-    } else {
-      // Leave the placeholder in place. Phase C discovery code handles
-      // this gracefully (tiers 2 + 3 skip "no_baked_collection_id" +
-      // fall through to the baked manifest id). Not a blocker, just a
-      // note so the operator knows discovery is partially disabled.
-      console.warn(
-        `[bulk-inscribe] ${collectionPlaceholder} still in boot.js `
-        + `(collection-metadata:pokebells-collection.json not inscribed yet). `
-        + `Discovery tiers 2 + 3 will skip; boot will fall back to `
-        + `the baked manifest id only.`,
-      );
+    if (!collectionEntry?.inscription_id) {
+      return {
+        text: "",
+        replaced: 0,
+        unresolved: [
+          `root-html requires collection-metadata:pokebells-collection.json `
+          + `but it is not in progress yet. Inscribe main-manifest then `
+          + `collection-metadata (filled via fillCollectionMetadata) before `
+          + `inscribing root-html. Refusing to bake ${collectionPlaceholder} `
+          + `into a permanent root inscription — Phase C discovery would be `
+          + `dead on arrival.`,
+        ],
+      };
     }
+    boot = boot.split(collectionPlaceholder).join(collectionEntry.inscription_id);
   }
   boot = boot.split(placeholder).join(mainId);
 
