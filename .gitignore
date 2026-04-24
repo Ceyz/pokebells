@@ -43,6 +43,7 @@ tools/*
 !tools/bulk-inscribe.mjs
 !tools/bulk-inscribe.test.mjs
 !tools/bulk-inscribe-collection.test.mjs
+!tools/phase-b-live-probe.mjs
 !tools/gen-bells-wallet.mjs
 !tools/BULK-INSCRIBE.md
 !tools/build-inscription-plan.mjs
