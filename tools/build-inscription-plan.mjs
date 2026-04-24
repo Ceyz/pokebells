@@ -26,8 +26,12 @@ async function main() {
   const assets = [];
 
   // ---- Tier 1: raw binary leaves (no dependencies) ----
-  // ROM chunks
-  const romManifest = JSON.parse(await readFile(join(REPO, 'game/manifest.local.json'), 'utf8'));
+  // ROM chunks — pokebells-patched build (intro-skip + skip-mom +
+  // hardcoded TRAINER/RIVAL + bedroom spawn + pre-set Pokegear flags).
+  // manifest.local.json still references the vanilla build for
+  // developer-machine dev; switch to that if you need to inscribe
+  // vanilla instead.
+  const romManifest = JSON.parse(await readFile(join(REPO, 'game/manifest.pokebells.json'), 'utf8'));
   for (const chunk of romManifest.chunks) {
     const abs = join(REPO, 'game', chunk.source.path);
     const fp = await fingerprint(abs);
@@ -174,15 +178,16 @@ async function main() {
 
   // ---- Tier 2: aggregate manifests (reference ids from tier 1) ----
   // After tier 1 is inscribed, fill ids into:
-  //   manifest.testnet-template.json  -> ROM manifest (rom-chunks + runtime + sprite_pack ref)
+  //   manifest.pokebells-testnet-template.json -> ROM manifest for the
+  //     pokebells-patched build (matches tier-1 chunks + binjgb ids).
   //   sprite-pack.manifest.template.json -> filled with sprite ids
-  //   collection metadata JSON (p:pokebells-collection) — NEW, see below
+  //   collection metadata JSON (p:pokebells-collection)
 
   assets.push({
     role: 'rom-manifest',
     inscribeAs: 'pokecrystal-rom.json',
     contentType: 'application/json',
-    file: 'game/manifest.testnet-template.json',
+    file: 'game/manifest.pokebells-testnet-template.json',
     // Filled after tier 1 — bytes + sha256 recomputed at inscribe time.
     bytes: null,
     sha256: null,

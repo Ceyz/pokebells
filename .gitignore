@@ -95,6 +95,8 @@ game/indexer/src/gen2-species.mjs
 !game/manifest.template.json
 !game/manifest.local.json
 !game/manifest.testnet-template.json
+!game/manifest.pokebells-testnet-template.json
+!game/manifest.pokebells.json
 !game/collection.template.json
 !game/inscription-plan.template.json
 !game/inscription-checklist.testnet.md

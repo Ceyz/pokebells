@@ -29,7 +29,23 @@
 // This module is pure: no DOM, no network. It runs in Node 22+ and any
 // browser with Web Crypto (crypto.subtle, P-256 ECDSA).
 
-import { verifyNintondoRawSignature, resolveBellsServices } from '../signin-verify.mjs';
+// signin-verify.mjs attaches its exports to window.PokeBellsSigninVerify
+// (bottom of that file) so we can skip a relative import here. Blob-URL
+// module loading in inscription mode has no base URL to resolve `../`
+// against — it fails with "Invalid relative url or base scheme isn't
+// hierarchical". Using the global side-effect registration is the
+// no-bundler cross-module comms pattern already established by boot.js
+// for shell.js → capture-core etc.
+function resolveSigninGlobals() {
+  const g = (typeof window !== 'undefined' ? window.PokeBellsSigninVerify : null)
+    ?? (typeof globalThis !== 'undefined' ? globalThis.PokeBellsSigninVerify : null);
+  if (!g || typeof g.verifyNintondoRawSignature !== 'function' || typeof g.resolveBellsServices !== 'function') {
+    throw new Error('signin-verify module must load before pbrp/session-key (expected window.PokeBellsSigninVerify)');
+  }
+  return g;
+}
+const verifyNintondoRawSignature = (...args) => resolveSigninGlobals().verifyNintondoRawSignature(...args);
+const resolveBellsServices = (...args) => resolveSigninGlobals().resolveBellsServices(...args);
 
 export const SESSION_CHALLENGE_PREFIX = 'pokebells:session:v1';
 export const MAX_TTL_MS = 4 * 60 * 60 * 1000;

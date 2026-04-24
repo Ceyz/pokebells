@@ -1,0 +1,121 @@
+{
+  "format": "pokebells-rom-manifest-v1",
+  "generatedAt": "2026-04-22T04:49:52.416Z",
+  "network": "bells-testnet",
+  "chunkByteLimit": 245760,
+  "contentBaseUrl": "https://bells-testnet-content.nintondo.io/content/",
+  "rom": {
+    "name": "pokecrystal-pokebells.gbc",
+    "byteLength": 2097152,
+    "sha256": "6fad18f517f8c137e4b3f1a74b286cee726dcb99af4a87e62d8d4fd42169f8d9",
+    "chunkCount": 9,
+    "cacheKey": "rom:6fad18f517f8c137e4b3f1a74b286cee726dcb99af4a87e62d8d4fd42169f8d9"
+  },
+  "mode": "inscription-template",
+  "runtime": {
+    "js": {
+      "type": "inscription",
+      "inscriptionId": "BINJGB_JS_INSCRIPTION_ID",
+      "byteLength": 21626,
+      "sha256": "4cadb3dbe040fc773c2ea64263a8ca8bfe52795036a16de1222c96d0af30c779"
+    },
+    "wasm": {
+      "type": "inscription",
+      "inscriptionId": "BINJGB_WASM_INSCRIPTION_ID",
+      "byteLength": 98685,
+      "sha256": "a6267f82c41d1c24d895e95ae397170ab53276704384dbb5f705f8a669d0ec5d"
+    }
+  },
+  "chunks": [
+    {
+      "index": 0,
+      "byteOffset": 0,
+      "byteLength": 245760,
+      "sha256": "f61c84f617074d98e639d635e6893750925e223acf3c28fb5278a0ca93aa3365",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_000_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 1,
+      "byteOffset": 245760,
+      "byteLength": 245760,
+      "sha256": "9bcf333bf468f64a7e680f6bac70901bd7b6452657d4873451cd01421b243d80",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_001_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 2,
+      "byteOffset": 491520,
+      "byteLength": 245760,
+      "sha256": "121282dc7f3b6b9716a05ca00d1d35d91f14ea687e71f0a004b739fa5b686953",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_002_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 3,
+      "byteOffset": 737280,
+      "byteLength": 245760,
+      "sha256": "ab30342f30433dce4b3c3f14f4f328e1f0153b14eb82fe84ba75f67a5f15e99e",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_003_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 4,
+      "byteOffset": 983040,
+      "byteLength": 245760,
+      "sha256": "53052f71da35d89952e289e1d82a130db8f5d64e0ae207c18d57e29a360f1adc",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_004_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 5,
+      "byteOffset": 1228800,
+      "byteLength": 245760,
+      "sha256": "51effb5334a57166bfc165855c18381b2b53684e111af05759ad0921d8e08ec2",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_005_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 6,
+      "byteOffset": 1474560,
+      "byteLength": 245760,
+      "sha256": "1a2d5c849c68bcd1884ae6eb104692fca85f8023708728c274506f001aba8801",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_006_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 7,
+      "byteOffset": 1720320,
+      "byteLength": 245760,
+      "sha256": "01e167efda1d74c086924eac3fb2c99a75aaa86b7b21c8487311942369846835",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_007_INSCRIPTION_ID"
+      }
+    },
+    {
+      "index": 8,
+      "byteOffset": 1966080,
+      "byteLength": 131072,
+      "sha256": "14915b72562ded7ebb700fd69f26db145dbfb97c05d9e5b50c63718adb1fb80e",
+      "source": {
+        "type": "inscription",
+        "inscriptionId": "ROM_CHUNK_008_INSCRIPTION_ID"
+      }
+    }
+  ]
+}

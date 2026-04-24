@@ -1,8 +1,8 @@
 # PokeBells Gen 2 Testnet Inscription Checklist
 
-Generated: 2026-04-23T23:26:23.747Z
+Generated: 2026-04-24T08:29:12.343Z
 Assets total: 529
-Tier 1 known bytes: 3330130 (≈ 3.18 MB)
+Tier 1 known bytes: 3332373 (≈ 3.18 MB)
 
 ## Workflow
 
@@ -17,15 +17,15 @@ Tier 1 known bytes: 3330130 (≈ 3.18 MB)
 
 | Index | Inscribe as | Bytes | sha256 | Source |
 |---|---|---|---|---|
-| 0 | `pokecrystal.part000.bin` | 245760 | `9f42581576d8048e…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part000.bin` |
-| 1 | `pokecrystal.part001.bin` | 245760 | `f5cd24b14fdb4de9…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part001.bin` |
-| 2 | `pokecrystal.part002.bin` | 245760 | `9693b1821eb49594…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part002.bin` |
-| 3 | `pokecrystal.part003.bin` | 245760 | `06f9a59b6ce38028…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part003.bin` |
-| 4 | `pokecrystal.part004.bin` | 245760 | `53052f71da35d899…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part004.bin` |
-| 5 | `pokecrystal.part005.bin` | 245760 | `51effb5334a57166…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part005.bin` |
-| 6 | `pokecrystal.part006.bin` | 245760 | `1a2d5c849c68bcd1…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part006.bin` |
-| 7 | `pokecrystal.part007.bin` | 245760 | `01e167efda1d74c0…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part007.bin` |
-| 8 | `pokecrystal.part008.bin` | 131072 | `157b54a11baee659…` | `game/chunks/pokecrystal-d6702e353dcb/pokecrystal.part008.bin` |
+| 0 | `pokecrystal.part000.bin` | 245760 | `f61c84f617074d98…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part000.bin` |
+| 1 | `pokecrystal.part001.bin` | 245760 | `9bcf333bf468f64a…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part001.bin` |
+| 2 | `pokecrystal.part002.bin` | 245760 | `121282dc7f3b6b97…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part002.bin` |
+| 3 | `pokecrystal.part003.bin` | 245760 | `ab30342f30433dce…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part003.bin` |
+| 4 | `pokecrystal.part004.bin` | 245760 | `53052f71da35d899…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part004.bin` |
+| 5 | `pokecrystal.part005.bin` | 245760 | `51effb5334a57166…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part005.bin` |
+| 6 | `pokecrystal.part006.bin` | 245760 | `1a2d5c849c68bcd1…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part006.bin` |
+| 7 | `pokecrystal.part007.bin` | 245760 | `01e167efda1d74c0…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part007.bin` |
+| 8 | `pokecrystal.part008.bin` | 131072 | `14915b72562ded7e…` | `game/chunks/pokecrystal-pokebells-6fad18f517f8/pokecrystal-pokebells.part008.bin` |
 
 ### 1b. Binjgb runtime (2, 120311 bytes)
 
@@ -38,7 +38,7 @@ Tier 1 known bytes: 3330130 (≈ 3.18 MB)
 
 502 PNGs — one entry per dex × {normal, shiny}. Full list in `inscription-checklist.testnet.json`.
 
-### 1d. ES modules (8, 436990 bytes)
+### 1d. ES modules (8, 439233 bytes)
 
 **Inscribe each as `.txt`** (the Inscriber rejects `.js`/`.mjs`).
 
@@ -50,15 +50,15 @@ Tier 1 known bytes: 3330130 (≈ 3.18 MB)
 | `pending_captures` | `pending_captures.txt` | 10527 | `4c4612c8c21d25a0…` | `game/pending-captures.mjs` |
 | `wallet_adapter` | `wallet_adapter.txt` | 23440 | `c8f16cc540012cbc…` | `game/wallet-adapter.mjs` |
 | `signin_verify` | `signin_verify.txt` | 32220 | `4b8943e2585bc7de…` | `game/signin-verify.mjs` |
-| `pbrp_session_key` | `pbrp_session_key.txt` | 10017 | `d5c26054ee274bf2…` | `game/pbrp/session-key.mjs` |
-| `shell` | `shell.txt` | 179123 | `bd42340340681e5c…` | `game/shell.js` |
+| `pbrp_session_key` | `pbrp_session_key.txt` | 11052 | `3799a0d1a8f41cf7…` | `game/pbrp/session-key.mjs` |
+| `shell` | `shell.txt` | 180331 | `9fd94a7b76d0b56d…` | `game/shell.js` |
 
 ## Tier 2 — Aggregate manifests (fill tier-1 ids first)
 
 ### rom-manifest
 
 - Inscribe as: `pokecrystal-rom.json`
-- Source template: `game/manifest.testnet-template.json`
+- Source template: `game/manifest.pokebells-testnet-template.json`
 - Placeholder: `ROM_MANIFEST_INSCRIPTION_ID`
 - Note: After tier 1: open this JSON, replace every ROM_CHUNK_*/BINJGB_*_INSCRIPTION_ID with the real i0 strings, recompute bytes+sha256, then inscribe.
 
