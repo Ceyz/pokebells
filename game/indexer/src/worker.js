@@ -857,8 +857,8 @@ export default {
             (SELECT COUNT(*) FROM ingestion_log)   AS log_size
         `).first();
         const recentLog = await env.DB.prepare(`
-          SELECT inscription_id, kind, network, outcome, reason, logged_at
-          FROM ingestion_log ORDER BY logged_at DESC LIMIT 30
+          SELECT inscription_id, kind, network, outcome, reason, ingested_at
+          FROM ingestion_log ORDER BY ingested_at DESC LIMIT 30
         `).all();
         const queue = await env.DB.prepare(`
           SELECT inscription_id, kind, network, attempts, retry_after, last_error
