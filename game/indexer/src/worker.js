@@ -1499,7 +1499,7 @@ async function processQueueEntry(env, entry) {
 // Otherwise: fetch body, run the shared apply* helper, requeue on
 // still-fetching 404, dequeue on success or permanent validation fail.
 
-async function drainCollectionQueueEntry(env, entry) {
+export async function drainCollectionQueueEntry(env, entry) {
   const { inscription_id: id, network, attempts } = entry;
   if (await getCollectionRoot(env, id, network)) {
     await dequeueIngestion(env, id, "collection");
@@ -1543,7 +1543,7 @@ async function drainCollectionQueueEntry(env, entry) {
   return "ok";
 }
 
-async function drainCollectionUpdateQueueEntry(env, entry) {
+export async function drainCollectionUpdateQueueEntry(env, entry) {
   const { inscription_id: id, network, attempts } = entry;
   // Short-circuit if the update has already been accepted via another
   // path. Check collection_updates directly; a row there means we're

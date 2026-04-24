@@ -6,7 +6,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import workerModule from "./worker.js";
+import workerModule, {
+  drainCollectionQueueEntry, drainCollectionUpdateQueueEntry,
+} from "./worker.js";
 
 const COLL_ID = `${"1".repeat(64)}i0`;
 const COLL_REVEAL_TXID = "1".repeat(64);
@@ -152,6 +154,26 @@ function createFakeEnv({ collectionBody = VALID_COLLECTION_BODY, updateBody = VA
                 };
                 if (idx >= 0) state.ingestion_queue[idx] = row;
                 else state.ingestion_queue.push(row);
+                return { success: true };
+              }
+              if (sql.includes("DELETE FROM ingestion_queue")) {
+                const [inscriptionId, kind] = args;
+                const idx = state.ingestion_queue.findIndex(
+                  (r) => r.inscription_id === inscriptionId && r.kind === kind,
+                );
+                if (idx >= 0) state.ingestion_queue.splice(idx, 1);
+                return { success: true };
+              }
+              if (sql.includes("UPDATE ingestion_queue")) {
+                const [retryAfter, lastError, inscriptionId, kind] = args;
+                const row = state.ingestion_queue.find(
+                  (r) => r.inscription_id === inscriptionId && r.kind === kind,
+                );
+                if (row) {
+                  row.attempts += 1;
+                  row.retry_after = retryAfter;
+                  row.last_error = lastError ?? null;
+                }
                 return { success: true };
               }
               // Silently accept other statements — e.g. ingestion_log is
@@ -557,4 +579,234 @@ test("GET /api/collection/latest: bad id -> 400", async () => {
     env, fetchImpl,
   });
   assert.equal(resp.status, 400);
+});
+
+// =====================================================================
+// Queue drain — collection + collection_update (GPT round-4 gap)
+// =====================================================================
+// These hit drainCollectionQueueEntry / drainCollectionUpdateQueueEntry
+// directly to exercise the cron path that the POST tests cover only
+// indirectly ("POST 404 enqueues" leaves the drain itself untested).
+
+function makeQueueEntry(kind, inscriptionId, overrides = {}) {
+  return {
+    inscription_id: inscriptionId,
+    kind,
+    network: "bells-testnet",
+    attempts: 0,
+    last_error: null,
+    ...overrides,
+  };
+}
+
+async function runDrain(handler, { env, fetchImpl, entry }) {
+  const real = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try { return await handler(env, entry); }
+  finally { globalThis.fetch = real; }
+}
+
+// ---- collection drain ----
+
+test("drainCollectionQueueEntry: success path registers root + dequeues", async () => {
+  const { env, state, fetchImpl } = createFakeEnv();
+  // Simulate a queued entry the cron is draining.
+  state.ingestion_queue.push({
+    inscription_id: COLL_ID, kind: "collection", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: "prev",
+  });
+  const outcome = await runDrain(drainCollectionQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection", COLL_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "ok");
+  assert.equal(state.collections.length, 1, "root registered");
+  assert.equal(state.ingestion_queue.length, 0, "dequeued after success");
+});
+
+test("drainCollectionQueueEntry: content host 404 requeues (transient)", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: { [`https://mock-content-testnet/${COLL_ID}`]: 404 },
+  });
+  state.ingestion_queue.push({
+    inscription_id: COLL_ID, kind: "collection", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection", COLL_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "requeued");
+  assert.equal(state.collections.length, 0, "not registered yet");
+  assert.equal(state.ingestion_queue.length, 1, "stays in queue");
+  assert.equal(state.ingestion_queue[0].attempts, 2, "bumped");
+});
+
+test("drainCollectionQueueEntry: malformed JSON is permanent -> drop", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: { [`https://mock-content-testnet/${COLL_ID}`]: "not-json-garbage" },
+  });
+  state.ingestion_queue.push({
+    inscription_id: COLL_ID, kind: "collection", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection", COLL_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "dropped");
+  assert.equal(state.collections.length, 0);
+  assert.equal(state.ingestion_queue.length, 0, "dequeued after permanent fail");
+});
+
+test("drainCollectionQueueEntry: schema violation is permanent -> drop (no rejected_updates for collections)", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    // REPLACE_ placeholder is deterministically rejected by strict
+    // ingestion validator — not retryable.
+    collectionBody: { ...VALID_COLLECTION_BODY, app_manifest_ids: ["REPLACE_ME"] },
+  });
+  state.ingestion_queue.push({
+    inscription_id: COLL_ID, kind: "collection", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection", COLL_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "dropped");
+  assert.equal(state.collections.length, 0);
+  assert.equal(state.ingestion_queue.length, 0);
+  assert.equal(state.rejected_updates.length, 0, "collections have no rejected_updates table");
+});
+
+// ---- collection_update drain ----
+
+test("drainCollectionUpdateQueueEntry: success path inserts accepted update + dequeues", async () => {
+  const { env, state, fetchImpl } = createFakeEnv();
+  await registerRoot(env, fetchImpl);
+  state.ingestion_queue.push({
+    inscription_id: UPDATE_ID, kind: "collection_update", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionUpdateQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection_update", UPDATE_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "ok");
+  assert.equal(state.collection_updates.length, 1);
+  assert.equal(state.ingestion_queue.length, 0);
+  assert.equal(state.rejected_updates.length, 0);
+});
+
+test("drainCollectionUpdateQueueEntry: collection_not_registered is transient -> requeue, NO audit row", async () => {
+  // Round-4 invariant: a retryable state MUST NOT pollute
+  // rejected_updates even after many retries. The indexer queue
+  // self-heals when the root eventually registers.
+  const { env, state, fetchImpl } = createFakeEnv();
+  // Intentionally skip registerRoot — the update arrives before
+  // its collection root.
+  state.ingestion_queue.push({
+    inscription_id: UPDATE_ID, kind: "collection_update", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionUpdateQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection_update", UPDATE_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "requeued");
+  assert.equal(state.ingestion_queue.length, 1);
+  assert.equal(state.ingestion_queue[0].attempts, 2);
+  assert.equal(state.rejected_updates.length, 0, "must NOT write audit row for retryable state");
+  assert.equal(state.collection_updates.length, 0);
+});
+
+test("drainCollectionUpdateQueueEntry: sat-spend vin[0] mismatch is permanent -> rejected_updates + drop", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    txOverrides: {
+      [`https://mock-electrs-testnet/tx/${UPDATE_COMMIT_TXID}`]: {
+        vin: [
+          { txid: "f".repeat(64), vout: 1 },
+          { txid: COLL_REVEAL_TXID, vout: 0 },  // wrong position — vin[1] not [0]
+        ],
+      },
+    },
+  });
+  await registerRoot(env, fetchImpl);
+  state.ingestion_queue.push({
+    inscription_id: UPDATE_ID, kind: "collection_update", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionUpdateQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection_update", UPDATE_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "dropped");
+  assert.equal(state.ingestion_queue.length, 0);
+  assert.equal(state.collection_updates.length, 0);
+  assert.equal(state.rejected_updates.length, 1);
+  assert.match(state.rejected_updates[0].reason, /vin\[0\] did not match/);
+});
+
+test("drainCollectionUpdateQueueEntry: electrs fetch failure is transient -> requeue, NO audit row", async () => {
+  // An electrs blip mid-drain should not permanently reject a valid
+  // update. Round-4 P1 fix: authority fetch failures are transient.
+  const { env, state, fetchImpl } = createFakeEnv();
+  const blipFetch = async (url, opts) => {
+    const key = typeof url === "string" ? url : url.toString();
+    if (key.startsWith("https://mock-electrs-testnet/tx/")) {
+      throw new Error("electrs connection refused");
+    }
+    return fetchImpl(url, opts);
+  };
+  await registerRoot(env, fetchImpl);
+  state.ingestion_queue.push({
+    inscription_id: UPDATE_ID, kind: "collection_update", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionUpdateQueueEntry, {
+    env, fetchImpl: blipFetch,
+    entry: makeQueueEntry("collection_update", UPDATE_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "requeued");
+  assert.equal(state.ingestion_queue.length, 1);
+  assert.equal(state.ingestion_queue[0].attempts, 2);
+  assert.equal(state.rejected_updates.length, 0, "infra blip must NOT write audit row");
+  assert.equal(state.collection_updates.length, 0);
+});
+
+test("drainCollectionUpdateQueueEntry: content host 404 requeues (transient)", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: { [`https://mock-content-testnet/${UPDATE_ID}`]: 404 },
+  });
+  await registerRoot(env, fetchImpl);
+  state.ingestion_queue.push({
+    inscription_id: UPDATE_ID, kind: "collection_update", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionUpdateQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection_update", UPDATE_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "requeued");
+  assert.equal(state.ingestion_queue.length, 1);
+  assert.equal(state.rejected_updates.length, 0);
+});
+
+test("drainCollectionUpdateQueueEntry: non-JSON body is permanent -> rejected_updates + drop", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: { [`https://mock-content-testnet/${UPDATE_ID}`]: "not-json-body" },
+  });
+  await registerRoot(env, fetchImpl);
+  state.ingestion_queue.push({
+    inscription_id: UPDATE_ID, kind: "collection_update", network: "bells-testnet",
+    enqueued_at: 0, retry_after: 0, attempts: 1, last_error: null,
+  });
+  const outcome = await runDrain(drainCollectionUpdateQueueEntry, {
+    env, fetchImpl,
+    entry: makeQueueEntry("collection_update", UPDATE_ID, { attempts: 1 }),
+  });
+  assert.equal(outcome, "dropped");
+  assert.equal(state.ingestion_queue.length, 0);
+  assert.equal(state.rejected_updates.length, 1);
+  assert.match(state.rejected_updates[0].reason, /fetch_via_queue.*content_not_json/);
 });
