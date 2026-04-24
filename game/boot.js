@@ -97,7 +97,17 @@ function detectMode() {
   const host = window.location.hostname.toLowerCase();
   const isNintondoHost = host.endsWith('nintondo.io');
   const hasManifestParam = new URLSearchParams(window.location.search).has('manifest');
-  if (isNintondoHost || hasManifestParam) return 'inscription';
+  // When Nintondo renders an HTML inscription thumbnail inside a
+  // sandboxed/data: iframe, window.location.hostname is '' (not
+  // nintondo.io) and the hostname test fails. If the root HTML was
+  // baked with a real DEFAULT_{network}_MANIFEST_ID (placeholder was
+  // substituted by tools/bulk-inscribe.mjs' fillRootHtml), that's the
+  // strongest signal we're in inscription mode regardless of hostname.
+  const INSCRIPTION_ID_RE = /^[0-9a-f]{64}i\d+$/i;
+  const hasBakedDefault =
+    INSCRIPTION_ID_RE.test(DEFAULT_TESTNET_MANIFEST_ID) ||
+    INSCRIPTION_ID_RE.test(DEFAULT_MAINNET_MANIFEST_ID);
+  if (isNintondoHost || hasManifestParam || hasBakedDefault) return 'inscription';
   return 'local';
 }
 
