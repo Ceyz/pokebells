@@ -420,13 +420,16 @@ function inscribeLocal({
 //
 // For pokebells_inscriber_chunks (array field in main-manifest), each
 // element is a separate placeholder string; they resolve independently.
-function fillTier2FromProgress(asset, checklist, progress) {
+function fillTier2FromProgress(asset, checklist, progress, network) {
   // Role-specific fillers for tier-2 assets whose template doesn't have
   // unique placeholder strings (e.g. sprite-pack has 502 identical
   // `REPLACE_ME_AFTER_INSCRIBE_i0` placeholders, disambiguated by dex
   // number + "normal"/"shiny" key).
   if (asset.role === "sprite-pack-manifest") {
     return fillSpritePackManifest(asset, progress);
+  }
+  if (asset.role === "root-html") {
+    return fillRootHtml(asset, progress, network);
   }
 
   const filePath = path.resolve(REPO_ROOT, asset.file);
@@ -460,6 +463,57 @@ function fillTier2FromProgress(asset, checklist, progress) {
   }
 
   return { text, replaced, unresolved: Array.from(unresolvedSet) };
+}
+
+// Build the root-html inscription body:
+//   1. Read game/boot.js, replace DEFAULT_{network}_MANIFEST_ID with the
+//      currently-inscribed main-manifest id (from progress.json).
+//   2. Read game/index.html, replace the <script type="module" src="boot.js">
+//      tag with an inline module <script> whose body is the patched boot.js.
+// Result is a fully self-contained HTML file: opening
+// https://bells-<net>-content.nintondo.io/content/<root-id> in a browser
+// loads the game without any off-chain dependency (aside from the Nintondo
+// content host itself). The baked default means `?manifest=` URL param is
+// optional; pass one to override for testing a new manifest revision.
+function fillRootHtml(asset, progress, network) {
+  const htmlPath = path.resolve(REPO_ROOT, asset.file);  // game/index.html
+  const bootPath = path.resolve(REPO_ROOT, "game/boot.js");
+  const mainManifestEntry = progress.inscriptions["main-manifest:pokebells-manifest.json"];
+  if (!mainManifestEntry?.inscription_id) {
+    return { text: "", replaced: 0, unresolved: ["main-manifest not yet inscribed (main-manifest:pokebells-manifest.json missing from progress)"] };
+  }
+  const mainId = mainManifestEntry.inscription_id;
+
+  let boot = fs.readFileSync(bootPath, "utf8");
+  const placeholder = network === "bells-mainnet"
+    ? "REPLACE_ME_BEFORE_MAINNET_MINT"
+    : "REPLACE_ME_BEFORE_TESTNET_MINT";
+  if (!boot.includes(placeholder)) {
+    return {
+      text: "",
+      replaced: 0,
+      unresolved: [`boot.js is missing the ${placeholder} placeholder — cannot bake default manifest id`],
+    };
+  }
+  boot = boot.split(placeholder).join(mainId);
+
+  let html = fs.readFileSync(htmlPath, "utf8");
+  // Inline the patched boot.js. We also drop the `src=` + replace the
+  // whole script tag in one go to avoid residual whitespace oddities.
+  const scriptTagRe = /<script\s+type="module"\s+src="boot\.js"\s*>\s*<\/script>/;
+  if (!scriptTagRe.test(html)) {
+    return {
+      text: "",
+      replaced: 0,
+      unresolved: ["index.html does not contain the expected <script type=\"module\" src=\"boot.js\"></script> tag"],
+    };
+  }
+  // Escape `</script>` inside boot body just in case. Boot doesn't contain
+  // the string but this keeps the transform robust against future edits.
+  const inlineBody = boot.replace(/<\/script>/gi, "<\\/script>");
+  html = html.replace(scriptTagRe, `<script type="module">\n${inlineBody}\n</script>`);
+
+  return { text: html, replaced: 1, unresolved: [] };
 }
 
 // Per-dex walker for sprite-pack.manifest.template.json. The template
@@ -621,6 +675,7 @@ async function main() {
     "main-manifest",
     "collection-metadata",
     "sprite-pack-manifest",
+    "root-html",
   ]);
 
   let tier2Deferred = 0;
@@ -640,7 +695,7 @@ async function main() {
         console.log(`[${idx}/${remaining.length}] ${asset.role} ${asset.inscribeAs} — DEFERRED (no auto-fill strategy)`);
         continue;
       }
-      const filled = fillTier2FromProgress(asset, checklist, progress);
+      const filled = fillTier2FromProgress(asset, checklist, progress, opts.network);
       if (filled.unresolved.length > 0) {
         tier2Deferred++;
         console.log(
