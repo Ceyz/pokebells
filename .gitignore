@@ -44,6 +44,8 @@ tools/*
 !tools/bulk-inscribe.test.mjs
 !tools/bulk-inscribe-collection.test.mjs
 !tools/phase-b-live-probe.mjs
+# Live probe log — kept in repo as evidence of the Phase B + C PASS.
+!tools/phase-b-live-probe.log
 !tools/gen-bells-wallet.mjs
 !tools/BULK-INSCRIBE.md
 !tools/build-inscription-plan.mjs
@@ -125,6 +127,8 @@ build/
 *.log
 # Phase 0 probe log — kept in repo as evidence of sat-spend-v1 PASS.
 !tools/probe-sat-spend.log
+# Phase B + C live round-trip log — kept as PASS evidence.
+!tools/phase-b-live-probe.log
 .DS_Store
 Thumbs.db
 desktop.ini

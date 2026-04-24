@@ -1,11 +1,31 @@
-# Root App Indirection — Design v3 (frozen)
+# Root App Indirection — Design v3 (frozen) — LIVE-VALIDATED 2026-04-24
 
-Status: **v3 frozen 2026-04-24 after three GPT rounds.** Implements
-P0 #9 (root app inscribed) and resolves product decision #2
-(`op:"collection_update"` authority mechanism). Depends on
-MAINNET-PLAN.md. Two sub-items gate implementation: the Phase 0
-feasibility probe below, and the same-block ordering constraint in
-the authority rule.
+Status: **v3 frozen + Phase B + C live-validated end-to-end on
+Bells testnet 2026-04-24.** Implements P0 #9 (root app inscribed)
+and resolves product decision #2 (`op:"collection_update"`
+authority mechanism). Depends on MAINNET-PLAN.md.
+
+Live round-trip fixtures (see `tools/phase-b-live-probe.log`):
+- collection: `1ecc86cd6983d4c8eab44d9f0b208bcba10852a37d17b6839d2d497819f5118di0`
+- update:     `890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856i0`
+- commit_tx:  `09df8ee6426d5e0f52d77b9f951715fa7097d436fad5b372847444a0c406d30f`
+
+The live probe proved in one invocation:
+1. Phase A strict validator accepts a well-formed p:pokebells-collection
+   body (no REPLACE_ placeholders).
+2. D1 schema is applied (collections + collection_updates +
+   rejected_updates tables exist on the deployed Worker).
+3. Sat-spend-v1 authority check works against real electrs —
+   commit tx's vin[0] matching the collection satpoint passes;
+   anything else would reject with
+   `authority:vin[0] did not match`.
+4. Sequence monotonicity enforced at DB layer; the aggregator
+   returns the correct `stats.applied_updates = 1`.
+5. Prepend-only aggregation applies correctly:
+   `app_manifest_ids: [<prepended>, <initial>]`.
+6. Current-satpoint derivation matches the derived-from-chain
+   design: after the first update, `current_satpoint` =
+   `(update.reveal_txid, 0)`.
 
 ## Motivation
 

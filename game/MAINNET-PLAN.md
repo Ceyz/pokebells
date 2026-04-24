@@ -83,6 +83,23 @@ requires another review round.
      Nintondo electrs filters UTXOs ≤ 1000 sats from the address
      endpoint, so Phase B tooling + indexer must track satpoints
      independently (see ROOT-APP-DESIGN.md "Phase 0 findings").
+   - **LIVE TESTNET ROUND-TRIP PASS 2026-04-24** via
+     `tools/phase-b-live-probe.mjs`. Full pipeline end-to-end on
+     real Bells testnet: inscribe collection body → strict
+     validator accepts → sat-spend-v1 update inscribed with
+     commit tx spending the collection UTXO at vin[0] →
+     `POST /api/collection-updates` accepted → `GET /api/collection/latest`
+     returns the aggregated view with applied_updates=1, correctly
+     prepended app_manifest_ids, and a current_satpoint equal to
+     the update's `reveal_txid:0`. Fixtures (persisted as
+     regression anchors):
+     - collection: `1ecc86cd6983d4c8eab44d9f0b208bcba10852a37d17b6839d2d497819f5118di0`
+     - update:     `890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856i0`
+     - commit:     `09df8ee6426d5e0f52d77b9f951715fa7097d436fad5b372847444a0c406d30f`
+     Phase B + C are now mainnet-ready from a code + protocol
+     standpoint; the remaining gates are product decisions (multi-
+     tab lease lock, service-fee address location) + the hub /
+     root-app inscription choreography.
    - **Phase C shipped 2026-04-24 — boot.js discovery**:
      `game/boot.js` adds `DEFAULT_*_COLLECTION_ID` +
      `DEFAULT_*_INDEXER_URL` baked constants + an async

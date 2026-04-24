@@ -1,0 +1,51 @@
+[live-probe] address: EKpFkdEunUFfoPMFp2X5YzML7S6w5uczgP
+[live-probe] network: bells-testnet
+[live-probe] electrs: https://bells-testnet-api.nintondo.io
+[live-probe] indexer: https://pokebells-indexer.ceyzcrypto.workers.dev
+[live-probe] content: https://bells-testnet-content.nintondo.io/content/
+[live-probe] fee:     3 sat/vB
+
+[step 1] fetch UTXOs + inscribe collection body
+         2 UTXO(s), 3093155582 sats
+[step 1] collection id 1ecc86cd6983d4c8eab44d9f0b208bcba10852a37d17b6839d2d497819f5118di0
+         commit=2e08e942e90acb31… reveal=1ecc86cd6983d4c8…
+
+[step 2] POST /api/collections
+         waiting 10 s for content host to index…
+         HTTP 200 {"ok":true,"status":"registered","inscription_id":"1ecc86cd6983d4c8eab44d9f0b208bcba10852a37d17b6839d2d497819f5118di0","network":"bells-testnet","initial_reveal_txid":"1ecc86cd6983d4c8eab44d9f0b208bcb
+
+[step 3] fetch UTXOs + inscribe collection_update with sat-spend-v1
+         3 UTXO(s) in pool (incl. injected inscription UTXO), smallest=1000
+[step 3] update id 890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856i0
+         commit inputs: 1ecc86cd:0(1000), 2e08e942:1(93152932)
+         sat-spend check: commit.vin[0] == collection satpoint? YES ✓
+
+[step 4] POST /api/collection-updates
+         waiting 10 s for content host + electrs to index…
+         HTTP 200 {"ok":true,"status":"accepted","inscription_id":"890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856i0","update_sequence":1,"commit_txid":"09df8ee6426d5e0f52d77b9f951715fa7097d436fad5b372847444a0c406d30f","reveal_txid":"890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856","
+
+[step 5] GET /api/collection/latest
+         HTTP 200
+         applied_updates=1
+         app_manifest_ids=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbi0","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai0"]
+         current_satpoint=890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856:0 last_sequence=1
+
+======================================================================
+PHASE B + C LIVE ROUND-TRIP RESULT
+======================================================================
+Collection inscription id:     1ecc86cd6983d4c8eab44d9f0b208bcba10852a37d17b6839d2d497819f5118di0
+Update inscription id:         890ea7191ff64fede254464889b0ea1c8cbfe6b03d69226ca3c9c68204b44856i0
+Collection registered (POST)?  YES ✓
+Commit tx vin[0] = satpoint?   YES ✓
+Update accepted (POST)?        YES ✓
+GET /api/collection/latest:    YES ✓
+  stats.applied_updates === 1  YES ✓
+  app_manifest_ids prepended   YES ✓
+  current_satpoint updated     YES ✓
+
+Overall:                       PASS ✓
+======================================================================
+
+Phase B + Phase C are validated end-to-end on testnet. The
+collection + update inscription ids above can be persisted as
+fixtures for regression testing.
