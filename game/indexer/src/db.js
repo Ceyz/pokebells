@@ -403,15 +403,31 @@ export async function insertPokemon(env, mintInscriptionId, normalized, rawJson)
   try {
     await doInsert(isStarter);
   } catch (e) {
-    // UNIQUE constraint on is_starter=1 partial index lost the race —
-    // another concurrent mint for this wallet already grabbed the
-    // starter slot. Retry as a non-starter row.
-    if (isStarter === 1 && /UNIQUE constraint/i.test(String(e.message))) {
+    // UNIQUE constraint on idx_pokemon_starter_unique partial index lost
+    // the race — another concurrent mint for this wallet already grabbed
+    // the starter slot. Retry as a non-starter row.
+    //
+    // Match on the specific index name (not just "UNIQUE constraint") so
+    // a different UNIQUE violation — e.g. pokemon.mint_inscription_id PK
+    // on a replayed POST — does not trigger a spurious non-starter retry.
+    if (isStarter === 1 && isStarterRaceError(e)) {
       await doInsert(0);
       return;
     }
     throw e;
   }
+}
+
+// Detects the D1 error raised when two concurrent inserts both try to
+// grab is_starter=1 and the partial UNIQUE INDEX idx_pokemon_starter_unique
+// rejects the second. Inspects e.message AND e.cause.message because D1
+// sometimes wraps the SQLite error inside a cause chain.
+export function isStarterRaceError(e) {
+  const msg = String(e?.message ?? "");
+  const causeMsg = String(e?.cause?.message ?? "");
+  const combined = `${msg} ${causeMsg}`;
+  return /UNIQUE constraint failed/i.test(combined)
+      && /idx_pokemon_starter_unique/i.test(combined);
 }
 
 export async function pokemonByOwner(env, ownerAddress, network, limit = 50, offset = 0) {

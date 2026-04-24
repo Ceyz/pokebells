@@ -25,9 +25,12 @@ if (!signinTools) {
 
 const {
   CAPTURE_FRAMES_REQUIRED,
+  INSCRIBE_FEE_RATE_DEFAULT,
   PARTY_OFFSETS,
   RAM_ADDRS,
   SRAM_TOTAL_BYTE_LENGTH,
+  assertInscribeCallSafe,
+  assertMultiTabWriter,
   buildCaptureCommitRecord,
   buildCaptureProvenance,
   buildCapturedPokemonRecord,
@@ -154,6 +157,17 @@ const state = {
     manifest: null,
     resolver: null,
     source: null,
+  },
+  // Multi-tab writer lease (product decision #1, see MAINNET-PLAN.md).
+  // `isWriter: true` at boot is a permissive default: older browsers
+  // without navigator.locks and boot-time writes before the lease
+  // installer has run don't spuriously fail. Demoted to false only when
+  // we explicitly observe another tab holding the exclusive lock.
+  multiTab: {
+    isWriter: true,
+    hasLock: false,
+    banner: null,
+    releaseLock: null,
   },
   signin: {
     request: null,
@@ -2862,6 +2876,11 @@ async function notifyIndexerOfInscription({ attestation, kind, inscriptionId, ne
 }
 
 async function persistPendingCapture(row) {
+  // Fail-closed: a read-only tab (no writer lease) must not touch
+  // pendingCaptures because a parallel writer tab is the canonical
+  // editor. The UI disables the entry buttons for this case but the
+  // assert is defense-in-depth for anything we missed.
+  assertMultiTabWriter(state.multiTab);
   const db = await openDb();
   await dbPut(db, 'pendingCaptures', row);
 }
@@ -4041,6 +4060,18 @@ async function inscribePayloadOnChain({
   publicKeyHex,
   electrsBase,
 }) {
+  // P0 #6 pre-build PSBT safety. Throws before the inscriber builds
+  // anything, so a bad network, insane fee rate, oversized body, or
+  // malformed pubkey never reaches a wallet popup. See
+  // game/capture-core.mjs assertInscribeCallSafe for the full matrix.
+  assertInscribeCallSafe({
+    network,
+    walletAddress,
+    feeRate: INSCRIBE_FEE_RATE_DEFAULT,
+    bodyBytes,
+    publicKeyHex,
+  });
+
   const net = inscriber.networkForKey(network);
   const utxos = await fetchUtxosForMint(walletAddress, electrsBase);
   if (utxos.length === 0) throw new Error('wallet has no UTXOs on this network');
@@ -4065,7 +4096,7 @@ async function inscribePayloadOnChain({
     fromAddress: walletAddress,
     contentType: mime,
     data: Buffer.from(bodyBytes),
-    feeRate: 150,
+    feeRate: INSCRIBE_FEE_RATE_DEFAULT,
     publicKey: Buffer.from(publicKeyHex.match(/.{2}/g).map((b) => parseInt(b, 16))),
     signPsbt: signPsbtViaWallet,
     getUtxos,
@@ -4086,6 +4117,11 @@ function setMintStatusUi(text, tone) {
 }
 
 async function runDirectMintFlow(attestation) {
+  // Multi-tab read-only guard: reject before loading the inscriber
+  // bundle / showing wallet popups. persistPendingCapture also guards
+  // internally as defense-in-depth.
+  assertMultiTabWriter(state.multiTab);
+
   const indexerBase = indexerBaseFor();
   const cap = detectDirectMintCapability();
   if (!cap.canDirectMint) {
@@ -5139,13 +5175,84 @@ refreshWalletView().catch((error) => {
 });
 refreshPokeballStatus().catch(() => {});
 
-// Multi-tab guard. Two tabs on the same origin share IndexedDB, which
-// means a parallel emulator write to SRAM or pendingCaptures can
-// silently corrupt the other tab's save. Users have hit this at least
-// once ("j'ai lancé deux onglets en meme temps"). Detect other live
-// tabs via BroadcastChannel and show a dismissable warning banner.
-// Lightweight: no heartbeats, no locks, just a hello/ack ping at boot.
-(function installMultiTabGuard() {
+// Multi-tab writer lease (product decision #1 — see MAINNET-PLAN.md).
+// Two tabs on the same origin share IndexedDB, so parallel emulator /
+// pendingCaptures writes can silently corrupt saves ("j'ai lancé deux
+// onglets en meme temps"). navigator.locks gives us an exclusive lease
+// named 'pokebells:writer': the first tab holds it for its lifetime and
+// runs normally; later tabs observe isWriter=false and enter read-only
+// mode. Write-side entry points (persistPendingCapture, runDirectMintFlow)
+// call assertMultiTabWriter as fail-closed defense-in-depth. On browsers
+// without navigator.locks we fall back to the previous warning-only
+// BroadcastChannel banner so the user still gets a signal.
+(function installWriterLock() {
+  const canUseLocks = typeof navigator !== 'undefined'
+    && navigator.locks
+    && typeof navigator.locks.request === 'function';
+
+  if (!canUseLocks) {
+    installLegacyMultiTabWarning();
+    return;
+  }
+
+  navigator.locks.request(
+    'pokebells:writer',
+    { mode: 'exclusive', ifAvailable: true },
+    async (lock) => {
+      if (lock === null) {
+        // Another tab already holds the lease. Stay read-only for this
+        // tab's life; user must close the other tab + refresh here to
+        // take over.
+        state.multiTab.isWriter = false;
+        state.multiTab.hasLock = false;
+        showReadOnlyBanner();
+        return;
+      }
+      // We hold the lease. Mark writer, then park on an unresolved
+      // Promise so the callback doesn't return (returning would release
+      // the lease). beforeunload calls releaseLock() to exit cleanly.
+      state.multiTab.isWriter = true;
+      state.multiTab.hasLock = true;
+      await new Promise((release) => {
+        state.multiTab.releaseLock = () => {
+          release();
+          state.multiTab.releaseLock = null;
+        };
+      });
+      state.multiTab.isWriter = false;
+      state.multiTab.hasLock = false;
+    },
+  ).catch((e) => {
+    // navigator.locks rejected for unexpected reasons (quota, sandbox
+    // iframe policy…). Fall back to the legacy warning.
+    try { log(`multi-tab: writer-lock request failed: ${e.message}`, 'warn'); }
+    catch {}
+    installLegacyMultiTabWarning();
+  });
+
+  window.addEventListener('beforeunload', () => {
+    try { state.multiTab.releaseLock?.(); } catch {}
+  });
+})();
+
+function showReadOnlyBanner() {
+  if (state.multiTab.banner) return;
+  const banner = document.createElement('div');
+  banner.setAttribute('role', 'alert');
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99998;'
+    + 'padding:10px 14px;background:#b45a00;color:#fff;'
+    + 'font:13px/1.4 system-ui,sans-serif;display:flex;gap:10px;'
+    + 'align-items:center;justify-content:center;';
+  banner.innerHTML =
+    '<strong>⚠ Read-only tab.</strong> Another PokeBells tab is the '
+    + 'active writer. Mint, save, and pending-capture transitions are '
+    + 'disabled here to prevent save corruption. Close the other tab '
+    + 'and refresh this one to take over.';
+  document.body.prepend(banner);
+  state.multiTab.banner = banner;
+}
+
+function installLegacyMultiTabWarning() {
   if (typeof BroadcastChannel === 'undefined') return;
   let channel;
   try { channel = new BroadcastChannel('pokebells-tabs'); }
@@ -5173,7 +5280,6 @@ refreshPokeballStatus().catch(() => {});
   channel.onmessage = (ev) => {
     const t = ev.data?.type;
     if (t === 'hi') {
-      // A new tab announced itself. We were here first — tell them.
       channel.postMessage({ type: 'already-here' });
     } else if (t === 'already-here') {
       otherTabs += 1;
@@ -5183,12 +5289,11 @@ refreshPokeballStatus().catch(() => {});
       if (otherTabs === 0 && banner) { banner.remove(); banner = null; }
     }
   };
-  // Announce ourselves. Existing tabs respond with 'already-here'.
   channel.postMessage({ type: 'hi' });
   window.addEventListener('beforeunload', () => {
     try { channel.postMessage({ type: 'bye' }); channel.close(); } catch {}
   });
-})();
+}
 
 // When boot.js is in inscription mode and the main-manifest advertises a
 // rom_manifest_inscription_id, point the Manifest URL input at the

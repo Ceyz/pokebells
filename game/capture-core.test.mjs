@@ -8,6 +8,11 @@ import {
   CAPTURE_COMMIT_OP_V1_5,
   CAPTURE_SCHEMA_VERSION,
   GEN2_UNSUPPORTED_LABEL,
+  INSCRIBE_FEE_RATE_DEFAULT,
+  INSCRIBE_FEE_RATE_MAX,
+  INSCRIBE_FEE_RATE_MIN,
+  INSCRIBE_MAX_BODY_BYTES,
+  INSCRIBE_NETWORKS,
   IVS_COMMITMENT_SCHEME,
   MINT_OP_V1_5,
   PARTY_OFFSETS,
@@ -21,6 +26,8 @@ import {
   SVBK_REGISTER,
   WRAM_BANK0_BYTE_LENGTH,
   WRAM_BYTE_LENGTH,
+  assertInscribeCallSafe,
+  assertMultiTabWriter,
   buildCaptureCommitRecord,
   buildCaptureProvenance,
   buildCapturedPokemonRecord,
@@ -775,6 +782,49 @@ test('v1.5 buildPokemonMintRecord builds a marketplace-ready NFT', async () => {
   assert.equal(mint.ram_witness_scheme, RAM_WITNESS_SCHEME_FULL_V1);
 });
 
+test('v1.5 buildPokemonMintRecord refuses to build when sprite resolver returns no image', async () => {
+  const { commitRecord, privateReveal } = await makeValidV15({ dexNo: 155 });
+  const captureInscriptionId = `${'d'.repeat(64)}i0`;
+
+  // Case A: resolver absent — the shell state where spritePack.resolver is
+  // null because the manifest failed to load. Previously produced a mint
+  // record with image:null that the indexer rejects as an orphan. Three
+  // such mints were lost on testnet 2026-04-24.
+  assert.throws(
+    () => buildPokemonMintRecord({
+      commitRecord,
+      commitInscriptionId: captureInscriptionId,
+      privateReveal,
+    }),
+    /sprite resolver returned no image/,
+  );
+
+  // Case B: resolver present but returns null for this species (missing
+  // manifest entry, placeholder inscription id, or transient miss).
+  assert.throws(
+    () => buildPokemonMintRecord({
+      commitRecord,
+      commitInscriptionId: captureInscriptionId,
+      privateReveal,
+      resolveSpriteImage: () => null,
+    }),
+    /sprite resolver returned no image/,
+  );
+
+  // Case C: resolver throws internally. resolveSpriteImageUrl swallows the
+  // exception and returns null, so the guard still fires and we never
+  // inscribe a half-built mint.
+  assert.throws(
+    () => buildPokemonMintRecord({
+      commitRecord,
+      commitInscriptionId: captureInscriptionId,
+      privateReveal,
+      resolveSpriteImage: () => { throw new Error('resolver blew up'); },
+    }),
+    /sprite resolver returned no image/,
+  );
+});
+
 test('v1.5 validateCaptureCommitRecord accepts valid + rejects schema breaks', async () => {
   const { commitRecord } = await makeValidV15();
   const ok = await validateCaptureCommitRecord(commitRecord);
@@ -1240,4 +1290,227 @@ test('v1.5 end-to-end: commit + mint round-trip validates fully', async () => {
   assert.equal(mint.species_name, 'Umbreon');
   assert.equal(mint.level, 24);
   assert.equal(mint.signed_in_wallet, commitRecord.signed_in_wallet);
+});
+
+// ============================================================================
+// P0 #6 PSBT safety — assertInscribeCallSafe (pre-build guard)
+// ============================================================================
+
+const VALID_INSCRIBE_PARAMS = Object.freeze({
+  network: 'bells-testnet',
+  walletAddress: 'tb1pwalletaddresswithnormallength0123456789',
+  feeRate: INSCRIBE_FEE_RATE_DEFAULT,
+  bodyBytes: new Uint8Array([0x7b, 0x7d]), // "{}"
+  publicKeyHex: '02' + 'a'.repeat(64),
+});
+
+test('assertInscribeCallSafe accepts a valid baseline', () => {
+  assert.doesNotThrow(() => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS }));
+});
+
+test('assertInscribeCallSafe rejects unsupported networks', () => {
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, network: 'btc-mainnet' }),
+    /unsupported network/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, network: '' }),
+    /unsupported network/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, network: null }),
+    /unsupported network/,
+  );
+});
+
+test('assertInscribeCallSafe accepts both supported networks', () => {
+  for (const net of INSCRIBE_NETWORKS) {
+    assert.doesNotThrow(
+      () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, network: net }),
+    );
+  }
+});
+
+test('assertInscribeCallSafe rejects missing/short/long/garbage walletAddress', () => {
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, walletAddress: '' }),
+    /walletAddress/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, walletAddress: 'short' }),
+    /walletAddress/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, walletAddress: 'x'.repeat(250) }),
+    /walletAddress/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({
+      ...VALID_INSCRIBE_PARAMS,
+      walletAddress: 'tb1p-with-dashes-is-bad-for-bech32',
+    }),
+    /unexpected characters/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, walletAddress: null }),
+    /walletAddress/,
+  );
+});
+
+test('assertInscribeCallSafe rejects feeRate out of sane range', () => {
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, feeRate: INSCRIBE_FEE_RATE_MIN - 1 }),
+    /feeRate/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, feeRate: INSCRIBE_FEE_RATE_MAX + 1 }),
+    /feeRate/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, feeRate: 1.5 }),
+    /feeRate/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, feeRate: null }),
+    /feeRate/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, feeRate: -1 }),
+    /feeRate/,
+  );
+});
+
+test('assertInscribeCallSafe accepts feeRate at both bounds', () => {
+  assert.doesNotThrow(() => assertInscribeCallSafe({
+    ...VALID_INSCRIBE_PARAMS, feeRate: INSCRIBE_FEE_RATE_MIN,
+  }));
+  assert.doesNotThrow(() => assertInscribeCallSafe({
+    ...VALID_INSCRIBE_PARAMS, feeRate: INSCRIBE_FEE_RATE_MAX,
+  }));
+});
+
+test('assertInscribeCallSafe rejects empty/oversized/non-Uint8Array bodyBytes', () => {
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, bodyBytes: new Uint8Array(0) }),
+    /empty/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({
+      ...VALID_INSCRIBE_PARAMS,
+      bodyBytes: new Uint8Array(INSCRIBE_MAX_BODY_BYTES + 1),
+    }),
+    /exceeds/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, bodyBytes: 'not an array' }),
+    /Uint8Array/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, bodyBytes: [1, 2, 3] }),
+    /Uint8Array/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, bodyBytes: null }),
+    /Uint8Array/,
+  );
+});
+
+test('assertInscribeCallSafe accepts Node Buffer (subclass of Uint8Array)', () => {
+  // Buffer.from(...) returns a Uint8Array subclass in Node, so it passes
+  // the guard. shell.js actually wraps bodyBytes with Buffer.from(...)
+  // before handing it to the inscriber lib, so this shape must be valid.
+  assert.doesNotThrow(() => assertInscribeCallSafe({
+    ...VALID_INSCRIBE_PARAMS,
+    bodyBytes: Buffer.from('{}', 'utf8'),
+  }));
+});
+
+test('assertInscribeCallSafe accepts bodyBytes at max cap', () => {
+  assert.doesNotThrow(() => assertInscribeCallSafe({
+    ...VALID_INSCRIBE_PARAMS,
+    bodyBytes: new Uint8Array(INSCRIBE_MAX_BODY_BYTES),
+  }));
+});
+
+test('assertInscribeCallSafe rejects malformed publicKeyHex', () => {
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, publicKeyHex: 'xyz' }),
+    /hex/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, publicKeyHex: '02aa' }),
+    /length/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({
+      ...VALID_INSCRIBE_PARAMS,
+      publicKeyHex: '02' + 'a'.repeat(65),  // odd length
+    }),
+    /length/,
+  );
+  assert.throws(
+    () => assertInscribeCallSafe({ ...VALID_INSCRIBE_PARAMS, publicKeyHex: null }),
+    /hex/,
+  );
+});
+
+test('assertInscribeCallSafe accepts 65-byte uncompressed pubkey', () => {
+  assert.doesNotThrow(() => assertInscribeCallSafe({
+    ...VALID_INSCRIBE_PARAMS,
+    publicKeyHex: '04' + 'a'.repeat(128),  // 130 hex chars
+  }));
+});
+
+test('assertInscribeCallSafe accepts uppercase hex pubkey', () => {
+  assert.doesNotThrow(() => assertInscribeCallSafe({
+    ...VALID_INSCRIBE_PARAMS,
+    publicKeyHex: '02' + 'A'.repeat(64),
+  }));
+});
+
+test('INSCRIBE_NETWORKS is frozen', () => {
+  assert.throws(() => INSCRIBE_NETWORKS.push('foo'));
+});
+
+test('INSCRIBE bounds are internally consistent', () => {
+  assert.ok(INSCRIBE_FEE_RATE_MIN < INSCRIBE_FEE_RATE_DEFAULT);
+  assert.ok(INSCRIBE_FEE_RATE_DEFAULT < INSCRIBE_FEE_RATE_MAX);
+  assert.ok(INSCRIBE_MAX_BODY_BYTES > 1024);
+});
+
+// ============================================================================
+// Multi-tab writer guard (product decision #1 — lease lock path)
+// ============================================================================
+
+test('assertMultiTabWriter throws when isWriter === false', () => {
+  assert.throws(
+    () => assertMultiTabWriter({ isWriter: false }),
+    /read-only.*another PokeBells tab/,
+  );
+});
+
+test('assertMultiTabWriter silent when isWriter === true', () => {
+  assert.doesNotThrow(() => assertMultiTabWriter({ isWriter: true }));
+});
+
+test('assertMultiTabWriter silent on unknown states (fail-open)', () => {
+  // Missing state, undefined, null, empty object, or boot-time default
+  // must NOT throw — older browsers without navigator.locks keep working,
+  // and calls made before the lease installer has run don't spuriously
+  // fail. Only the explicit isWriter=false signal blocks.
+  assert.doesNotThrow(() => assertMultiTabWriter(undefined));
+  assert.doesNotThrow(() => assertMultiTabWriter(null));
+  assert.doesNotThrow(() => assertMultiTabWriter({}));
+  assert.doesNotThrow(() => assertMultiTabWriter({ isWriter: undefined }));
+  assert.doesNotThrow(() => assertMultiTabWriter({ isWriter: null }));
+});
+
+test('assertMultiTabWriter message is actionable', () => {
+  try {
+    assertMultiTabWriter({ isWriter: false });
+    assert.fail('expected throw');
+  } catch (e) {
+    assert.match(e.message, /Close the other tab/);
+    assert.match(e.message, /refresh here/);
+  }
 });

@@ -103,6 +103,7 @@ game/indexer/src/gen2-species.mjs
 !game/inscription-checklist.testnet.json
 !game/build-rom-manifest.mjs
 !game/CRYSTAL-MIGRATION-TODO.md
+!game/MAINNET-PLAN.md
 
 # Synthesized by pages.yml at deploy — source of truth is game/pbrp/
 companion/pokebells/pbrp/

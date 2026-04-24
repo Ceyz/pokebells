@@ -1737,6 +1737,13 @@ export function buildPokemonMintRecord({
 
   const status = statusNameFromByte(slot.statusByte);
   const image = resolveSpriteImageUrl(resolveSpriteImage, dexNo, shiny);
+  if (!image) {
+    throw new Error(
+      `buildPokemonMintRecord: sprite resolver returned no image for species ${dexNo} `
+        + `(shiny=${shiny ? 'true' : 'false'}). Ensure the sprite pack manifest is loaded `
+        + `and contains a non-placeholder inscription id for this species before minting.`,
+    );
+  }
 
   const attributes = [
     { trait_type: 'Collection', value: POKEBELLS_COLLECTION_NAME },
@@ -2094,6 +2101,121 @@ export async function validatePokemonMintRecord(mintRecord, commitRecord, option
   return { ok: errors.length === 0, errors, error: errors[0] ?? null };
 }
 
+// ============================================================================
+// SECTION: Inscription-call safety (P0 #6 PSBT safety, pre-build half)
+// ============================================================================
+//
+// Pre-sign sanity guards for inscribePayloadOnChain (game/shell.js). Called
+// before the inscriber library builds a PSBT, so a bad param throws before
+// the user ever sees a wallet popup. Catches misconfiguration — wrong
+// network, insane fee rate, oversized body, malformed wallet params.
+//
+// Does NOT decode the signed PSBT to audit outputs. That is deferred P1
+// hardening: the inscriber bundle is chain-immutable, so the threat model
+// today is our own bugs, not a compromised inscriber swapping destinations.
+
+export const INSCRIBE_NETWORKS = Object.freeze([
+  'bells-mainnet', 'bells-testnet',
+]);
+
+// Default fee rate passed to the inscriber library. Kept here so the guard
+// stays in sync with the actual call — bump both if Bells raises the
+// target. Guard tolerates the [MIN..MAX] range so testnet experiments
+// with different rates don't require bumping this constant.
+export const INSCRIBE_FEE_RATE_DEFAULT = 150;
+export const INSCRIBE_FEE_RATE_MIN = 10;
+export const INSCRIBE_FEE_RATE_MAX = 500;
+
+// Largest body we will ever ask the inscriber to commit in a single call.
+// 512 KB is ~5x any realistic PokeBells payload (mint ~4 KB,
+// save-snapshot ~43 KB, indexer source chunk ~200 KB). Catches accidental
+// giant payloads before the inscriber tries to build them.
+export const INSCRIBE_MAX_BODY_BYTES = 512 * 1024;
+
+const INSCRIBE_HEX_RE = /^[0-9a-f]+$/i;
+const INSCRIBE_ADDRESS_RE = /^[0-9A-Za-z]+$/;
+
+// ----------------------------------------------------------------------------
+// Multi-tab writer guard (product decision #1 — lease lock path).
+// ----------------------------------------------------------------------------
+//
+// The shell holds a `navigator.locks` exclusive lease named
+// 'pokebells:writer' when it is the active writer tab. If two tabs are
+// open, only one gets the lease; the other sets isWriter=false and its
+// UI enters read-only mode. Write-side entry points (direct mint,
+// manual mint copy, save-snapshot inscribe) call assertMultiTabWriter
+// as a fail-closed defense-in-depth check in case the UI disable
+// path missed a button.
+//
+// Semantics: throws only on explicit isWriter === false. Undefined /
+// null / missing state is treated as "unknown, assume writer" so older
+// browsers without navigator.locks, or boot-time calls before the
+// lease installer has run, don't spuriously fail.
+
+export function assertMultiTabWriter(multiTabState) {
+  if (multiTabState && multiTabState.isWriter === false) {
+    throw new Error(
+      'multi-tab: this tab is read-only because another PokeBells tab '
+      + 'holds the writer lease. Close the other tab and refresh here '
+      + 'to take over.',
+    );
+  }
+}
+
+export function assertInscribeCallSafe({
+  network,
+  walletAddress,
+  feeRate,
+  bodyBytes,
+  publicKeyHex,
+}) {
+  if (!INSCRIBE_NETWORKS.includes(network)) {
+    throw new Error(`inscribe: unsupported network "${network}"`);
+  }
+
+  if (typeof walletAddress !== 'string'
+      || walletAddress.length < 20
+      || walletAddress.length > 200) {
+    throw new Error('inscribe: walletAddress missing or out of reasonable length');
+  }
+  if (!INSCRIBE_ADDRESS_RE.test(walletAddress)) {
+    throw new Error('inscribe: walletAddress contains unexpected characters');
+  }
+
+  if (!Number.isInteger(feeRate)
+      || feeRate < INSCRIBE_FEE_RATE_MIN
+      || feeRate > INSCRIBE_FEE_RATE_MAX) {
+    throw new Error(
+      `inscribe: feeRate ${feeRate} outside `
+      + `[${INSCRIBE_FEE_RATE_MIN}..${INSCRIBE_FEE_RATE_MAX}] sat/vB`,
+    );
+  }
+
+  if (!(bodyBytes instanceof Uint8Array)) {
+    throw new Error('inscribe: bodyBytes must be Uint8Array');
+  }
+  if (bodyBytes.byteLength === 0) {
+    throw new Error('inscribe: bodyBytes is empty');
+  }
+  if (bodyBytes.byteLength > INSCRIBE_MAX_BODY_BYTES) {
+    throw new Error(
+      `inscribe: bodyBytes ${bodyBytes.byteLength}B exceeds `
+      + `${INSCRIBE_MAX_BODY_BYTES}B cap`,
+    );
+  }
+
+  if (typeof publicKeyHex !== 'string' || !INSCRIBE_HEX_RE.test(publicKeyHex)) {
+    throw new Error('inscribe: publicKeyHex must be a hex string');
+  }
+  // Compressed secp256k1 pubkey = 33 bytes = 66 hex. Uncompressed = 65 bytes = 130.
+  if (publicKeyHex.length !== 66 && publicKeyHex.length !== 130) {
+    throw new Error(
+      `inscribe: publicKeyHex length ${publicKeyHex.length} not 66 (compressed) `
+      + `or 130 (uncompressed)`,
+    );
+  }
+}
+
 const browserExports = {
   ATTESTATION_SCHEME,
   ATTESTATION_SCHEME_V1,
@@ -2122,7 +2244,14 @@ const browserExports = {
   WRAM_BANK1_START,
   WRAM_BYTE_LENGTH,
   WRAM_START,
+  INSCRIBE_FEE_RATE_DEFAULT,
+  INSCRIBE_FEE_RATE_MAX,
+  INSCRIBE_FEE_RATE_MIN,
+  INSCRIBE_MAX_BODY_BYTES,
+  INSCRIBE_NETWORKS,
   assertBlockHashExists,
+  assertInscribeCallSafe,
+  assertMultiTabWriter,
   buildBlockByHashUrl,
   buildBlockTipHashUrl,
   SRAM_TOTAL_BYTE_LENGTH,
