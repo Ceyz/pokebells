@@ -244,6 +244,7 @@ const dom = {
   walletMint: document.getElementById('wallet-mint'),
   walletSyncPc: document.getElementById('wallet-sync-pc'),
   walletReset: document.getElementById('wallet-reset'),
+  walletResyncIndexer: document.getElementById('wallet-resync-indexer'),
   overlay: document.getElementById('screen-overlay'),
   log: document.getElementById('log'),
   screenWrap: document.querySelector('.screen-wrap'),
@@ -5040,6 +5041,41 @@ setTimeout(() => {
     log(`drainPendingIndexerRegistrations failed: ${error.message}`, 'warn');
   });
 }, 5000);
+
+// Manual re-notify button. Useful when the indexer was down during a
+// mint, the notify enqueued, boot-time drain failed too (indexer still
+// down), and the user wants to retry after it comes back. Walks every
+// pendingCaptures row's pending_registrations queue and POSTs each
+// pending kind (commit/mint) to the indexer.
+if (dom.walletResyncIndexer) {
+  dom.walletResyncIndexer.addEventListener('click', async () => {
+    dom.walletResyncIndexer.disabled = true;
+    const originalText = dom.walletResyncIndexer.textContent;
+    dom.walletResyncIndexer.textContent = 'Re-notifying…';
+    try {
+      const rowsBefore = await listPendingCaptures();
+      const queuedBefore = rowsBefore.reduce((s, r) =>
+        s + (Array.isArray(r.pending_registrations) ? r.pending_registrations.length : 0), 0);
+      await drainPendingIndexerRegistrations();
+      const rowsAfter = await listPendingCaptures();
+      const queuedAfter = rowsAfter.reduce((s, r) =>
+        s + (Array.isArray(r.pending_registrations) ? r.pending_registrations.length : 0), 0);
+      const drained = Math.max(0, queuedBefore - queuedAfter);
+      if (queuedBefore === 0) {
+        log(`Re-notify: no pending registrations queued.`, 'ok');
+      } else if (queuedAfter === 0) {
+        log(`Re-notify: ${drained} registration(s) acknowledged by indexer.`, 'ok');
+      } else {
+        log(`Re-notify: ${drained} / ${queuedBefore} succeeded, ${queuedAfter} still queued (indexer may still be down).`, 'warn');
+      }
+    } catch (error) {
+      log(`Re-notify failed: ${error.message}`, 'bad');
+    } finally {
+      dom.walletResyncIndexer.disabled = false;
+      dom.walletResyncIndexer.textContent = originalText;
+    }
+  });
+}
 bindKeyboard();
 
 // Steal focus from any text input when the user clicks the game area so the
