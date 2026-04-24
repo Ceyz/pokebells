@@ -434,18 +434,34 @@ Shipped (196/196 tests green):
   fail-closed, testnet skipped).
 
 Still pending in Phase B:
-- Worker route wiring in `indexer/src/worker.js`:
-  `POST /api/collections` (operator registers the root body),
-  `POST /api/collection-updates` (ingestion pipeline:
-  fetch inscription body from content host → validate schema →
-  strictly compare `parsed.network` to the route/DB network →
-  load `currentCollectionSatpoint` → `verifyCollectionUpdateAuthority`
-  → `insertAcceptedCollectionUpdate` on success, `recordRejectedUpdate`
-  on any failure), `GET /api/collection/latest` (returns
-  `aggregatedCollectionLatest`).
 - D1 migration ingestion so `schema.sql` changes auto-apply on the
   next deploy (the existing GHA hook handles this; just needs the
   schema push).
+
+Worker routes SHIPPED 2026-04-24 in `indexer/src/worker.js`:
+- `POST /api/collections` — fetches the inscription body, runs
+  `validateCollection()` in strict ingestion mode (no placeholders),
+  verifies the route network is declared in `body.networks`, calls
+  `registerCollectionRoot()`. Content-host 404 → 202 queued.
+- `POST /api/collection-updates` — fetches the update body, runs
+  `validateCollectionUpdate()`, strictly compares
+  `parsed.network === routeNetwork`, loads
+  `currentCollectionSatpoint()`, checks sequence `=== lastSeq + 1`,
+  runs `verifyCollectionUpdateAuthority()` (sat-spend-v1 with
+  strict vin[0] + reveal shape checks),
+  `insertAcceptedCollectionUpdate()` on success. ANY failure
+  (schema / network / sequence / authority / DB) is recorded in
+  `rejected_updates` (audit trail) + returned as a structured
+  reject; the worker never silently drops.
+- `GET /api/collection/latest?id=…&network=…` — returns
+  `aggregatedCollectionLatest()` JSON (root body + prepend-applied
+  updates + stats + current_satpoint) or 404 if root not
+  registered.
+
+12 smoke tests in `indexer/src/worker.test.js` exercise happy +
+reject paths end-to-end with a fake `globalThis.fetch` + in-memory
+DB mock (Node 18+ built-in Request/Response objects). indexer suite
+78 → 90 tests.
 
 ### Phase B deployment constraint (binding)
 

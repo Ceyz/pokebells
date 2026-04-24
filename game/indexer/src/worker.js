@@ -39,6 +39,7 @@
 import {
   fetchAndValidateInscription, validateReveal, validateSaveSnapshot,
   validateMintV1_5, verifyMintOwner,
+  validateCollection, validateCollectionUpdate, verifyCollectionUpdateAuthority,
 } from "./validator.js";
 import {
   insertCapture, insertReveal, applyRevealToCapture, logIngestion,
@@ -53,6 +54,9 @@ import {
   enqueueForIngestion, dequeueIngestion, bumpIngestionRetry,
   claimDueQueueEntries, INGESTION_QUEUE_MAX_ATTEMPTS,
   readScanCursor, writeScanCursor,
+  registerCollectionRoot, getCollectionRoot,
+  insertAcceptedCollectionUpdate, recordRejectedUpdate,
+  currentCollectionSatpoint, aggregatedCollectionLatest,
 } from "./db.js";
 
 // Exponential-ish backoff for queue retries: 1m, 2m, 5m, 10m, 20m,
@@ -777,6 +781,301 @@ async function handleGetStats(env) {
   });
 }
 
+// =====================================================================
+// Phase B routes — collection root + op:"collection_update"
+// =====================================================================
+// See game/ROOT-APP-DESIGN.md. Ingestion strict: validateCollection()
+// without allowPlaceholders, validateCollectionUpdate schema check,
+// strict parsed.network === routeNetwork, sequential update_sequence,
+// sat-spend-v1 authority check via electrs. Any failure goes to
+// rejected_updates (audit trail, never crashes the worker).
+
+async function fetchInscriptionContent(env, inscriptionId, network) {
+  const base = network === "bells-mainnet"
+    ? env.CONTENT_BASE_MAINNET
+    : env.CONTENT_BASE_TESTNET;
+  if (!base) {
+    throw new Error(`CONTENT_BASE_${network === "bells-mainnet" ? "MAINNET" : "TESTNET"} unset`);
+  }
+  const url = `${base}${encodeURIComponent(inscriptionId)}`;
+  const resp = await fetch(url, { cf: { cacheTtl: 60 } });
+  if (!resp.ok) {
+    const err = new Error(`content_host_${resp.status}`);
+    err.httpStatus = resp.status;
+    throw err;
+  }
+  const raw = await resp.text();
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (e) { throw new Error(`content_not_json: ${e.message}`); }
+  return { raw, parsed };
+}
+
+async function handlePostCollection(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ ok: false, error: "invalid_json" }, { status: 400 }); }
+
+  const inscriptionId = typeof body?.inscription_id === "string"
+    ? body.inscription_id.trim() : "";
+  const network = typeof body?.network === "string" ? body.network.trim() : "";
+
+  if (!INSCRIPTION_ID_RE.test(inscriptionId)) {
+    return json({ ok: false, error: "bad_inscription_id" }, { status: 400 });
+  }
+  if (network !== "bells-mainnet" && network !== "bells-testnet") {
+    return json({ ok: false, error: "bad_network" }, { status: 400 });
+  }
+
+  const ipPrefix = clientIpPrefix(request);
+
+  // Fetch inscription body from content host.
+  let raw, parsed;
+  try {
+    ({ raw, parsed } = await fetchInscriptionContent(env, inscriptionId, network));
+  } catch (e) {
+    if (e.httpStatus === 404) {
+      await logIngestion(env, inscriptionId, "collection", network, "queued", "content_not_ready", ipPrefix);
+      return json(
+        { ok: true, status: "queued", reason: "content host not ready, retry later" },
+        { status: 202 },
+      );
+    }
+    await logIngestion(env, inscriptionId, "collection", network, "invalid", e.message, ipPrefix);
+    return json(
+      { ok: false, error: "fetch_failed", reason: e.message },
+      { status: 422 },
+    );
+  }
+
+  // STRICT validation — ingestion mode rejects REPLACE_ placeholders +
+  // empty app_manifest_ids (see validator.js validateCollection).
+  const validation = validateCollection(parsed);
+  if (!validation.ok) {
+    await logIngestion(
+      env, inscriptionId, "collection", network, "invalid",
+      `${validation.stage}:${validation.reason}`, ipPrefix,
+    );
+    return json(
+      { ok: false, error: "validation_failed", stage: validation.stage, reason: validation.reason },
+      { status: 422 },
+    );
+  }
+
+  // Strict network compare: the body declares which networks it is
+  // canonical on. The route network must be one of them, otherwise
+  // we'd ingest a mainnet-only collection under testnet.
+  if (!validation.normalized.networks.includes(network)) {
+    await logIngestion(env, inscriptionId, "collection", network, "invalid", "network_mismatch", ipPrefix);
+    return json(
+      {
+        ok: false, error: "network_mismatch",
+        reason: `body.networks=${JSON.stringify(validation.normalized.networks)} does not include route network "${network}"`,
+      },
+      { status: 422 },
+    );
+  }
+
+  // The collection root's initial satpoint is (reveal_txid, 0). Every
+  // op:"collection_update" commit tx must spend from that location
+  // until the first update lands; then the new satpoint is derived
+  // from the update chain.
+  const initialRevealTxid = inscriptionId.replace(/i\d+$/i, "");
+
+  await registerCollectionRoot(env, {
+    inscriptionId,
+    network,
+    bodyJson: raw,
+    initialRevealTxid,
+  });
+
+  await logIngestion(env, inscriptionId, "collection", network, "registered", null, ipPrefix);
+  return json({
+    ok: true,
+    status: "registered",
+    inscription_id: inscriptionId,
+    network,
+    initial_reveal_txid: initialRevealTxid,
+  });
+}
+
+async function handlePostCollectionUpdate(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ ok: false, error: "invalid_json" }, { status: 400 }); }
+
+  const inscriptionId = typeof body?.inscription_id === "string"
+    ? body.inscription_id.trim() : "";
+  const routeNetwork = typeof body?.network === "string" ? body.network.trim() : "";
+
+  if (!INSCRIPTION_ID_RE.test(inscriptionId)) {
+    return json({ ok: false, error: "bad_inscription_id" }, { status: 400 });
+  }
+  if (routeNetwork !== "bells-mainnet" && routeNetwork !== "bells-testnet") {
+    return json({ ok: false, error: "bad_network" }, { status: 400 });
+  }
+
+  const ipPrefix = clientIpPrefix(request);
+
+  // Single helper so every reject path writes the audit row AND logs +
+  // returns the same envelope. The worker never silently drops an
+  // invalid update; it either accepts or records a reason.
+  async function rejectAndRecord(reason, collectionId, rawBody, httpStatus = 422) {
+    await recordRejectedUpdate(env, {
+      inscriptionId,
+      collectionInscriptionId: collectionId ?? null,
+      network: routeNetwork,
+      reason,
+      rawBodyJson: rawBody ?? null,
+    });
+    await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "invalid", reason, ipPrefix);
+    return json(
+      { ok: false, error: "update_rejected", reason },
+      { status: httpStatus },
+    );
+  }
+
+  let raw, parsed;
+  try {
+    ({ raw, parsed } = await fetchInscriptionContent(env, inscriptionId, routeNetwork));
+  } catch (e) {
+    if (e.httpStatus === 404) {
+      await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "queued", "content_not_ready", ipPrefix);
+      return json(
+        { ok: true, status: "queued", reason: "content host not ready, retry later" },
+        { status: 202 },
+      );
+    }
+    // Pre-schema failures don't get recorded in rejected_updates
+    // because we have no collection_inscription_id yet. Ingestion log
+    // carries the trace.
+    await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "invalid", e.message, ipPrefix);
+    return json(
+      { ok: false, error: "fetch_failed", reason: e.message },
+      { status: 422 },
+    );
+  }
+
+  const validation = validateCollectionUpdate(parsed);
+  if (!validation.ok) {
+    return rejectAndRecord(
+      `${validation.stage}:${validation.reason}`,
+      parsed?.collection_inscription_id ?? null,
+      raw,
+    );
+  }
+  const normalized = validation.normalized;
+
+  // STRICT network compare — parsed.network is what the inscription
+  // body self-declares; routeNetwork is what the client claims the
+  // inscription lives on. Mismatch = refusal, never an implicit fix.
+  if (normalized.network !== routeNetwork) {
+    return rejectAndRecord(
+      `network_mismatch:body=${normalized.network},route=${routeNetwork}`,
+      normalized.collection_inscription_id,
+      raw,
+    );
+  }
+
+  const satpoint = await currentCollectionSatpoint(
+    env,
+    normalized.collection_inscription_id,
+    routeNetwork,
+  );
+  if (!satpoint) {
+    return rejectAndRecord(
+      "collection_not_registered",
+      normalized.collection_inscription_id,
+      raw,
+    );
+  }
+
+  // Sequence is cheaper than authority (no electrs fetch); check first.
+  const expectedSequence = satpoint.lastSequence + 1;
+  if (normalized.update_sequence !== expectedSequence) {
+    return rejectAndRecord(
+      `sequence_not_sequential:got=${normalized.update_sequence},expected=${expectedSequence}`,
+      normalized.collection_inscription_id,
+      raw,
+    );
+  }
+
+  const auth = await verifyCollectionUpdateAuthority({
+    updateInscriptionId: inscriptionId,
+    expectedSatpoint: { revealTxid: satpoint.revealTxid, vout: satpoint.vout },
+    env,
+    network: routeNetwork,
+  });
+  if (!auth.ok) {
+    return rejectAndRecord(
+      `${auth.stage}:${auth.reason}`,
+      normalized.collection_inscription_id,
+      raw,
+    );
+  }
+
+  // All checks passed. The DB helper re-runs currentCollectionSatpoint
+  // internally as a defense against concurrent inserts (TOCTOU) and
+  // will throw if the sequence moved between our check and this insert.
+  try {
+    await insertAcceptedCollectionUpdate(env, {
+      inscriptionId,
+      collectionInscriptionId: normalized.collection_inscription_id,
+      network: routeNetwork,
+      updateSequence: normalized.update_sequence,
+      setJson: JSON.stringify(normalized.set),
+      commitTxid: auth.commit_txid,
+      revealTxid: auth.reveal_txid,
+    });
+  } catch (e) {
+    return rejectAndRecord(
+      `db_insert:${e.message}`,
+      normalized.collection_inscription_id,
+      raw,
+    );
+  }
+
+  await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "accepted", null, ipPrefix);
+  return json({
+    ok: true,
+    status: "accepted",
+    inscription_id: inscriptionId,
+    update_sequence: normalized.update_sequence,
+    commit_txid: auth.commit_txid,
+    reveal_txid: auth.reveal_txid,
+    authority_skipped: auth.skipped === true,
+  });
+}
+
+async function handleGetCollectionLatest(env, url) {
+  const collectionId = (url.searchParams.get("id") ?? "").trim();
+  const network = (url.searchParams.get("network") ?? "").trim();
+
+  if (!INSCRIPTION_ID_RE.test(collectionId)) {
+    return json({ ok: false, error: "bad_id" }, { status: 400 });
+  }
+  if (network !== "bells-mainnet" && network !== "bells-testnet") {
+    return json({ ok: false, error: "bad_network" }, { status: 400 });
+  }
+
+  let agg;
+  try { agg = await aggregatedCollectionLatest(env, collectionId, network); }
+  catch (e) {
+    return json(
+      { ok: false, error: "aggregate_failed", reason: e.message },
+      { status: 500 },
+    );
+  }
+  if (!agg) {
+    return json(
+      { ok: false, error: "not_found", reason: "collection root not registered for this network" },
+      { status: 404 },
+    );
+  }
+
+  return json({ ok: true, ...agg });
+}
+
 export default {
   async fetch(request, env, _ctx) {
     const url = new URL(request.url);
@@ -807,6 +1106,15 @@ export default {
     }
     if (url.pathname === "/api/saves" && request.method === "POST") {
       return handlePostSave(request, env);
+    }
+    if (url.pathname === "/api/collections" && request.method === "POST") {
+      return handlePostCollection(request, env);
+    }
+    if (url.pathname === "/api/collection-updates" && request.method === "POST") {
+      return handlePostCollectionUpdate(request, env);
+    }
+    if (url.pathname === "/api/collection/latest" && request.method === "GET") {
+      return handleGetCollectionLatest(env, url);
     }
 
     if (request.method === "GET") {

@@ -100,10 +100,14 @@ requires another review round.
        check via electrs tx fetch (commit tx must spend the
        expected satpoint). Fail-closed on mainnet without electrs;
        testnet skipped:true fallback for local dev. 10 tests.
-     - Still pending in Phase B: worker route wiring
-       (`POST /api/collections`, `POST /api/collection-updates`,
-       `GET /api/collection/latest`) — mostly plumbing on top of
-       the above helpers. Expected ~100-150 lines.
+     - Worker routes shipped 2026-04-24: `POST /api/collections`,
+       `POST /api/collection-updates` (full ingestion pipeline with
+       strict network compare + sequence check + sat-spend authority,
+       audit trail via `rejected_updates` on every reject path),
+       `GET /api/collection/latest`. 12 smoke tests
+       (`worker.test.js`) end-to-end with fake fetch + in-memory DB.
+       indexer suite 78 → 90 tests. Still pending: D1 migration push
+       + testnet live validation of the full round-trip.
    - **Phase C** (boot.js discovery + baked `DEFAULT_*_COLLECTION_ID`)
      still pending.
 10. **Fork resilience.** Follow `OPEN_SOURCE.md` from scratch and
