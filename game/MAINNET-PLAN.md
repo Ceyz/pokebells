@@ -50,24 +50,34 @@ requires another review round.
    (it is what `boot.js` `CONTENT_BASES` already targets); `/html/`
    works as a fallback. No Nintondo viewer chrome observed on either
    for HTML-typed inscriptions.
-3. **Origin safety — VALIDATED 2026-04-24 with one follow-up.**
-   Opened a second inscription id on the same content host
-   (`0ea64bbd…` mini-test root, HTML). Result: `window.nintondo`
-   is NOT auto-injected on that inscription despite being on the
-   same host. `connect?.('bellsTestnet')` returns `undefined` (the
-   method doesn't exist because the extension never ran on that
-   page). Confirms the mainnet threat model: wallet permission is
-   per-inscription (or per-some-other-extension-criterion), not
-   per-host. A random inscription cannot silently trigger signPsbt
-   on an active PokeBells wallet session.
-   - **Follow-up (not a P0 blocker)**: the exact injection criterion
-     is opaque — favicon / meta-tag / content hash / internal
-     allowlist (Nintondo extension source not available). Before
-     mainnet we should test whether a byte-identical copy of the
-     PokeBells root on a different inscription id also triggers
-     injection (if yes: user visiting a cloned attacker inscription
-     could get auto-connected; mitigation is visible
-     wallet confirmation UI + multi-tab lock).
+3. **Origin safety — validated against the inscriptions tested on
+   2026-04-24; not universally proven.** We opened the PokeBells
+   testnet root (`e1c15e0b…`, full game) and a second HTML inscription
+   on the same content host (`0ea64bbd…` mini-test root). Wallet was
+   injected on the first and NOT on the second; `connect?.('bellsTestnet')`
+   returned `undefined` on the second (no method, extension never ran
+   there). So on the concrete cases we tried, the mainnet threat
+   model holds: a random inscription on the same host cannot silently
+   trigger `signPsbt` against an active PokeBells wallet session.
+   - **Injection criterion is opaque.** The Nintondo extension is
+     closed-source; it could be keying on any combination of URL
+     pattern, page bytes, favicon/meta tags, DOM shape, internal
+     allowlist, or a saved per-inscription permission. Without source
+     we can only observe.
+   - **Follow-up probe before mainnet (P0-light / P1)**:
+     **byte-identical clone injection**. Inscribe a carbon copy of
+     the current PokeBells root HTML at a DIFFERENT inscription id
+     and visit it. If `window.nintondo` injects there too, the
+     extension is keying on content (or some content-derived
+     signal), meaning a cloned attacker inscription could get
+     injected — still mitigated by visible popup on first signPsbt
+     + multi-tab lease lock, but worth characterising. If it does
+     NOT inject, the extension is keying on the specific inscription
+     id / URL, which is the strongest isolation we could hope for.
+     Not a mainnet blocker in either case (user must voluntarily
+     visit the clone URL; real harm requires signPsbt which still
+     prompts), but the answer changes how confidently we communicate
+     origin safety in the project docs.
 4. **Storage scoping — CONFIRMED 2026-04-24.** Browser same-origin
    policy applies as expected: `localStorage` + IndexedDB
    (`pokebells-phase1@v4`) are SHARED across the two inscriptions on
