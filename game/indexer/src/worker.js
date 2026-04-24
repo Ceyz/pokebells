@@ -859,7 +859,7 @@ export default {
         }
         const recentLog = await tryQuery("recent_log", async () => {
           const r = await env.DB.prepare(
-            "SELECT inscription_id, kind, network, outcome, reason, ingested_at FROM ingestion_log ORDER BY ingested_at DESC LIMIT 30"
+            "SELECT inscription_id, kind, network, result, reject_reason, ingested_at FROM ingestion_log ORDER BY ingested_at DESC LIMIT 30"
           ).all();
           return r?.results ?? [];
         });
