@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-04-24T08:50:17.161Z",
+  "generatedAt": "2026-04-24T15:20:50.115Z",
   "network": "bells-testnet",
   "assetCount": 529,
-  "tier1KnownBytes": 3334001,
+  "tier1KnownBytes": 3353399,
   "notes": [
     "Inscribe in tier order (1 → 4). Inside tier 1 the order doesn't matter.",
     "Nintondo Inscriber rejects .js/.mjs uploads → inscribe ES modules as .txt.",
@@ -5657,8 +5657,8 @@
       "inscribeAs": "capture_core.txt",
       "contentType": "text/plain",
       "file": "game/capture-core.mjs",
-      "bytes": 86712,
-      "sha256": "0c6ac4f38ad2ec9b487f1b1b9bd36ad2e5c8018302f7e18b4a5f01230100d162",
+      "bytes": 95862,
+      "sha256": "8967fe9b89b4afc1a4af3f9c08090ba45860444ea056b5978c18e1ed0ddd3328",
       "dependsOn": [],
       "placeholder": "CAPTURE_CORE_INSCRIPTION_ID"
     },
@@ -5734,8 +5734,8 @@
       "inscribeAs": "shell.txt",
       "contentType": "text/plain",
       "file": "game/shell.js",
-      "bytes": 181959,
-      "sha256": "cf4fd9acbfbdf7ffb6572d01acf988ec471ade45b97520cde88073d9f3dff9db",
+      "bytes": 192207,
+      "sha256": "2f6a646672fc5cf2fc3509d650c3d54b0fd8035eeeb8f218fa02c3523df03dfc",
       "dependsOn": [],
       "placeholder": "SHELL_INSCRIPTION_ID"
     },
@@ -5799,9 +5799,11 @@
       "file": "game/collection.template.json",
       "bytes": null,
       "sha256": null,
-      "dependsOn": [],
-      "placeholder": "COLLECTION_INSCRIPTION_ID",
-      "note": "Write a fresh {\"p\":\"pokebells-collection\",\"v\":1,\"name\":\"PokeBells\",\"slug\":\"pokebells\",...} JSON and inscribe. See the main manifest for the exact schema consumers expect."
+      "dependsOn": [
+        "main-manifest"
+      ],
+      "placeholder": null,
+      "note": "Tier 2b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing."
     },
     {
       "role": "rom-manifest",
@@ -5829,11 +5831,10 @@
       "dependsOn": [
         "es-module",
         "rom-manifest",
-        "sprite-pack-manifest",
-        "collection-metadata"
+        "sprite-pack-manifest"
       ],
       "placeholder": "MAIN_MANIFEST_INSCRIPTION_ID",
-      "note": "After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest, collection) with real i0 strings, inscribe."
+      "note": "After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest) with real i0 strings, inscribe. The collection id is NOT in the manifest (Phase C: the pointer goes collection→manifest, not manifest→collection)."
     },
     {
       "role": "root-html",
@@ -5843,10 +5844,11 @@
       "bytes": null,
       "sha256": null,
       "dependsOn": [
-        "main-manifest"
+        "main-manifest",
+        "collection-metadata"
       ],
       "placeholder": "ROOT_INSCRIPTION_ID",
-      "note": "Edit boot.js DEFAULT_TESTNET_MANIFEST_ID to the main manifest id from tier 3, bundle with index.html (inline or concat), inscribe as a single .html file. Keep the same file for mainnet (with DEFAULT_MAINNET_MANIFEST_ID)."
+      "note": "tools/bulk-inscribe.mjs fillRootHtml bakes DEFAULT_*_MANIFEST_ID (from main-manifest progress) AND DEFAULT_*_COLLECTION_ID (from collection-metadata progress) into game/boot.js before inlining into index.html. Longest-prefix-first substitution so the manifest placeholder does not clobber the collection one."
     }
   ]
 }

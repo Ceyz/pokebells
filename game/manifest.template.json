@@ -16,6 +16,5 @@
     "POKEBELLS_INSCRIBER_CHUNK_2_INSCRIPTION_ID"
   ],
   "shell_inscription_id": "SHELL_INSCRIPTION_ID",
-  "rom_manifest_inscription_id": "ROM_MANIFEST_INSCRIPTION_ID",
-  "collection_inscription_id": "COLLECTION_INSCRIPTION_ID"
+  "rom_manifest_inscription_id": "ROM_MANIFEST_INSCRIPTION_ID"
 }

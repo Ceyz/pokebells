@@ -431,6 +431,9 @@ function fillTier2FromProgress(asset, checklist, progress, network) {
   if (asset.role === "root-html") {
     return fillRootHtml(asset, progress, network);
   }
+  if (asset.role === "collection-metadata") {
+    return fillCollectionMetadata(asset, progress);
+  }
 
   const filePath = path.resolve(REPO_ROOT, asset.file);
   let text = fs.readFileSync(filePath, "utf8");
@@ -539,6 +542,64 @@ function fillRootHtml(asset, progress, network) {
   html = html.replace(scriptTagRe, `<script type="module">\n${inlineBody}\n</script>`);
 
   return { text: html, replaced: 1, unresolved: [] };
+}
+
+// Fill game/collection.template.json by substituting
+// REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT (the only
+// placeholder in the collection body) with the real main-manifest
+// inscription id from the inscription progress.
+//
+// Phase C mint choreography (see game/ROOT-APP-DESIGN.md "Mint
+// choreography"): main-manifest MUST be inscribed before
+// collection-metadata. The reverse order makes the first collection
+// body ingest-incompatible — the strict Phase A validator rejects
+// REPLACE_ placeholders in app_manifest_ids, so POST /api/collections
+// would return 422 and the whole Phase C discovery chain would have
+// nothing to discover.
+export function fillCollectionMetadata(asset, progress) {
+  const filePath = path.resolve(REPO_ROOT, asset.file);
+  const originalText = fs.readFileSync(filePath, "utf8");
+
+  const mainManifest = progress.inscriptions?.["main-manifest:pokebells-manifest.json"];
+  if (!mainManifest?.inscription_id) {
+    return {
+      text: "",
+      replaced: 0,
+      unresolved: [
+        "main-manifest:pokebells-manifest.json not yet inscribed — "
+        + "cannot fill collection.app_manifest_ids[0]. Inscribe the "
+        + "main manifest first (see inscription-checklist dependency).",
+      ],
+    };
+  }
+
+  const placeholder = "REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT";
+  if (!originalText.includes(placeholder)) {
+    return {
+      text: "",
+      replaced: 0,
+      unresolved: [
+        `${asset.file} does not contain the expected placeholder `
+        + `"${placeholder}". Either the template drifted or the body `
+        + `is already filled.`,
+      ],
+    };
+  }
+
+  const text = originalText.split(placeholder).join(mainManifest.inscription_id);
+
+  // Sanity: filled body must still be valid JSON. Catches manifest
+  // ids that (somehow) include characters that break JSON parsing.
+  try { JSON.parse(text); }
+  catch (e) {
+    return {
+      text: "",
+      replaced: 0,
+      unresolved: [`filled collection body is not valid JSON: ${e.message}`],
+    };
+  }
+
+  return { text, replaced: 1, unresolved: [] };
 }
 
 // Per-dex walker for sprite-pack.manifest.template.json. The template
@@ -832,7 +893,21 @@ async function confirmPrompt(question) {
   return /^y(es)?$/i.test(answer.trim());
 }
 
-main().catch((e) => {
-  console.error("[fatal]", e?.stack ?? e?.message ?? String(e));
-  process.exit(1);
-});
+// Only run the CLI when invoked directly as a script; not when
+// imported (e.g. from tools/bulk-inscribe-collection.test.mjs, which
+// needs to reach into fillCollectionMetadata without triggering the
+// --checklist argv guard).
+const isMainEntry = (() => {
+  try {
+    const here = fileURLToPath(import.meta.url);
+    const argv1 = process.argv[1] ? path.resolve(process.argv[1]) : "";
+    return path.resolve(here) === argv1;
+  } catch { return false; }
+})();
+
+if (isMainEntry) {
+  main().catch((e) => {
+    console.error("[fatal]", e?.stack ?? e?.message ?? String(e));
+    process.exit(1);
+  });
+}

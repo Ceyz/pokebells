@@ -206,9 +206,20 @@ async function main() {
     file: 'game/collection.template.json',
     bytes: null,
     sha256: null,
-    dependsOn: [],
-    placeholder: 'COLLECTION_INSCRIPTION_ID',
-    note: 'Write a fresh {"p":"pokebells-collection","v":1,"name":"PokeBells","slug":"pokebells",...} JSON and inscribe. See the main manifest for the exact schema consumers expect.',
+    // Mint choreography: manifest FIRST, then collection with
+    // app_manifest_ids=[<manifest-id>]. Reversed from the prior cycle
+    // (manifest depended on collection), which made the first
+    // collection ingest-incompatible (strict Phase A validator
+    // rejects REPLACE_ placeholders). See game/ROOT-APP-DESIGN.md
+    // "Mint choreography" and "Phase A ingestion hardening".
+    dependsOn: ['main-manifest'],
+    // No asset.placeholder — the main manifest no longer carries
+    // collection_inscription_id (Phase C: the reverse pointer, from
+    // collection to manifest, is the canonical direction). root-html
+    // references the collection id directly via fillRootHtml, not via
+    // generic placeholder substitution.
+    placeholder: null,
+    note: 'Tier 2b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing.',
   });
 
   assets.push({
@@ -232,16 +243,22 @@ async function main() {
     file: 'game/manifest.template.json',
     bytes: null,
     sha256: null,
+    // Phase C: reversed dependency — collection-metadata now depends
+    // on main-manifest (needs the manifest id for app_manifest_ids[0]).
+    // main-manifest itself carries no collection_inscription_id field
+    // anymore (removed to break the cycle; nobody read it at runtime).
     dependsOn: [
-      'es-module', 'rom-manifest', 'sprite-pack-manifest', 'collection-metadata',
+      'es-module', 'rom-manifest', 'sprite-pack-manifest',
     ],
     placeholder: 'MAIN_MANIFEST_INSCRIPTION_ID',
-    note: 'After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest, collection) with real i0 strings, inscribe.',
+    note: 'After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest) with real i0 strings, inscribe. The collection id is NOT in the manifest (Phase C: the pointer goes collection→manifest, not manifest→collection).',
   });
 
   // ---- Tier 4: root HTML (bootloader) ----
   // The root HTML contains boot.js + the HTML shell. It needs the main
-  // manifest id baked as DEFAULT_TESTNET_MANIFEST_ID.
+  // manifest id baked as DEFAULT_*_MANIFEST_ID AND (Phase C) the
+  // collection id baked as DEFAULT_*_COLLECTION_ID, so discovery
+  // tiers 2 + 3 can locate the current manifest at boot time.
   assets.push({
     role: 'root-html',
     inscribeAs: 'pokebells.html',
@@ -249,9 +266,9 @@ async function main() {
     file: 'game/index.html',
     bytes: null,
     sha256: null,
-    dependsOn: ['main-manifest'],
+    dependsOn: ['main-manifest', 'collection-metadata'],
     placeholder: 'ROOT_INSCRIPTION_ID',
-    note: 'Edit boot.js DEFAULT_TESTNET_MANIFEST_ID to the main manifest id from tier 3, bundle with index.html (inline or concat), inscribe as a single .html file. Keep the same file for mainnet (with DEFAULT_MAINNET_MANIFEST_ID).',
+    note: 'tools/bulk-inscribe.mjs fillRootHtml bakes DEFAULT_*_MANIFEST_ID (from main-manifest progress) AND DEFAULT_*_COLLECTION_ID (from collection-metadata progress) into game/boot.js before inlining into index.html. Longest-prefix-first substitution so the manifest placeholder does not clobber the collection one.',
   });
 
   // Stats

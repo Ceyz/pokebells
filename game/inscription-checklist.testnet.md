@@ -1,8 +1,8 @@
 # PokeBells Gen 2 Testnet Inscription Checklist
 
-Generated: 2026-04-24T08:50:17.166Z
+Generated: 2026-04-24T15:20:50.121Z
 Assets total: 529
-Tier 1 known bytes: 3334001 (≈ 3.18 MB)
+Tier 1 known bytes: 3353399 (≈ 3.20 MB)
 
 ## Workflow
 
@@ -38,20 +38,20 @@ Tier 1 known bytes: 3334001 (≈ 3.18 MB)
 
 502 PNGs — one entry per dex × {normal, shiny}. Full list in `inscription-checklist.testnet.json`.
 
-### 1d. ES modules (8, 440861 bytes)
+### 1d. ES modules (8, 460259 bytes)
 
 **Inscribe each as `.txt`** (the Inscriber rejects `.js`/`.mjs`).
 
 | Key | Inscribe as | Bytes | sha256 | Source |
 |---|---|---|---|---|
-| `capture_core` | `capture_core.txt` | 86712 | `0c6ac4f38ad2ec9b…` | `game/capture-core.mjs` |
+| `capture_core` | `capture_core.txt` | 95862 | `8967fe9b89b4afc1…` | `game/capture-core.mjs` |
 | `gen2_species` | `gen2_species.txt` | 88346 | `e24c4574657c4249…` | `game/gen2-species.mjs` |
 | `gen2_pc_storage` | `gen2_pc_storage.txt` | 6605 | `ad403c244a7157f0…` | `game/gen2-pc-storage.mjs` |
 | `pending_captures` | `pending_captures.txt` | 10527 | `4c4612c8c21d25a0…` | `game/pending-captures.mjs` |
 | `wallet_adapter` | `wallet_adapter.txt` | 23440 | `c8f16cc540012cbc…` | `game/wallet-adapter.mjs` |
 | `signin_verify` | `signin_verify.txt` | 32220 | `4b8943e2585bc7de…` | `game/signin-verify.mjs` |
 | `pbrp_session_key` | `pbrp_session_key.txt` | 11052 | `3799a0d1a8f41cf7…` | `game/pbrp/session-key.mjs` |
-| `shell` | `shell.txt` | 181959 | `cf4fd9acbfbdf7ff…` | `game/shell.js` |
+| `shell` | `shell.txt` | 192207 | `2f6a646672fc5cf2…` | `game/shell.js` |
 
 ## Tier 2 — Aggregate manifests (fill tier-1 ids first)
 
@@ -66,8 +66,8 @@ Tier 1 known bytes: 3334001 (≈ 3.18 MB)
 
 - Inscribe as: `pokebells-collection.json`
 - Source template: `game/collection.template.json`
-- Placeholder: `COLLECTION_INSCRIPTION_ID`
-- Note: Write a fresh {"p":"pokebells-collection","v":1,"name":"PokeBells","slug":"pokebells",...} JSON and inscribe. See the main manifest for the exact schema consumers expect.
+- Placeholder: `null`
+- Note: Tier 2b: inscribe AFTER main-manifest. tools/bulk-inscribe.mjs fillCollectionMetadata substitutes REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT in game/collection.template.json with the main-manifest inscription id from progress before inscribing.
 
 ### rom-manifest
 
@@ -81,12 +81,12 @@ Tier 1 known bytes: 3334001 (≈ 3.18 MB)
 - Inscribe as: `pokebells-manifest.json`
 - Source template: `game/manifest.template.json`
 - Placeholder: `MAIN_MANIFEST_INSCRIPTION_ID`
-- Note: After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest, collection) with real i0 strings, inscribe.
+- Note: After tier 2: fill every *_inscription_id (capture_core, gen2_*, wallet_adapter, signin_verify, pbrp_session_key, pokebells_inscriber, shell, rom_manifest) with real i0 strings, inscribe. The collection id is NOT in the manifest (Phase C: the pointer goes collection→manifest, not manifest→collection).
 
 ## Tier 4 — Root HTML
 
 - Inscribe as: `pokebells.html`
 - Source template: `game/index.html`
 - Placeholder: `ROOT_INSCRIPTION_ID`
-- Note: Edit boot.js DEFAULT_TESTNET_MANIFEST_ID to the main manifest id from tier 3, bundle with index.html (inline or concat), inscribe as a single .html file. Keep the same file for mainnet (with DEFAULT_MAINNET_MANIFEST_ID).
+- Note: tools/bulk-inscribe.mjs fillRootHtml bakes DEFAULT_*_MANIFEST_ID (from main-manifest progress) AND DEFAULT_*_COLLECTION_ID (from collection-metadata progress) into game/boot.js before inlining into index.html. Longest-prefix-first substitution so the manifest placeholder does not clobber the collection one.
 

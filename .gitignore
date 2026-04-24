@@ -42,6 +42,7 @@ tools/*
 !tools/apply-d1-schema.mjs
 !tools/bulk-inscribe.mjs
 !tools/bulk-inscribe.test.mjs
+!tools/bulk-inscribe-collection.test.mjs
 !tools/gen-bells-wallet.mjs
 !tools/BULK-INSCRIBE.md
 !tools/build-inscription-plan.mjs
