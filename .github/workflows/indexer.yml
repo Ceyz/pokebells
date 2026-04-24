@@ -11,6 +11,9 @@ on:
       # MUST trigger an indexer redeploy so validators stay in lock-step.
       - "game/capture-core.mjs"
       - "game/gen2-species.mjs"
+      # d1:migrate uses this helper; a change here must retrigger
+      # the indexer deploy so the fix reaches production.
+      - "tools/apply-d1-schema.mjs"
       - ".github/workflows/indexer.yml"
 
 permissions:
