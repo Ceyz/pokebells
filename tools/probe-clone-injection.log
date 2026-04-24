@@ -1,0 +1,39 @@
+[clone-probe] address:  EKpFkdEunUFfoPMFp2X5YzML7S6w5uczgP
+[clone-probe] network:  bells-testnet
+[clone-probe] source:   e1c15e0bd5b4be8a76cb03c35ebdb96388ea2528242f2cb57db6ce0e454f4ea2i0
+[clone-probe] fee:      3 sat/vB
+
+[step 1] fetching source inscription bytes
+         53057 bytes, content-type=text/html; charset=utf-8
+[step 2] 2 UTXO(s), 3093151126 sats total
+[step 2] estimated fee: reveal ~40203, commit ~3000, total ~43203 sats
+
+[step 3] inscribing clone (byte-identical to e1c15e0bd5b4be8a…)
+[step 3] clone id       6c35d0f9a9c4caf3da5f96555fdbe51a053a8c7f81e8a0c0cc65e5883f4060c7i0
+         commit=2979fb4aace2e47e… reveal=6c35d0f9a9c4caf3…
+         fees: commit=702 reveal=40539 total=41241
+
+======================================================================
+CLONE INJECTION PROBE — operator follow-up
+======================================================================
+Source inscription (real PokeBells root):
+  https://bells-testnet-content.nintondo.io/content/e1c15e0bd5b4be8a76cb03c35ebdb96388ea2528242f2cb57db6ce0e454f4ea2i0
+Clone inscription (byte-identical, different id):
+  https://bells-testnet-content.nintondo.io/content/6c35d0f9a9c4caf3da5f96555fdbe51a053a8c7f81e8a0c0cc65e5883f4060c7i0
+
+Open the CLONE URL in a NEW browser tab + dev-tools console and run:
+
+  console.log("nintondo on clone?", typeof window.nintondo);
+  if (window.nintondo) {
+    try { console.log("auto-account:", await window.nintondo.getAccount()); }
+    catch (e) { console.log("getAccount threw:", e.message); }
+  }
+
+Interpretation:
+  - typeof === 'undefined' → extension keys on URL/id/allowlist. STRONGEST isolation.
+  - typeof === 'object' with silent getAccount → extension keys on content;
+    a clone can auto-connect. Mitigated by signPsbt popup + multi-tab lock,
+    but we should communicate origin safety more conservatively in docs.
+  - typeof === 'object' with getAccount throw / popup → extension injects
+    but scopes permission per-inscription. Reasonable isolation.
+======================================================================

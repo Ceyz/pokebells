@@ -133,6 +133,8 @@ build/
 !tools/probe-sat-spend.log
 # Phase B + C live round-trip log — kept as PASS evidence.
 !tools/phase-b-live-probe.log
+# Clone-injection probe log — origin-safety follow-up evidence.
+!tools/probe-clone-injection.log
 .DS_Store
 Thumbs.db
 desktop.ini
