@@ -53,6 +53,7 @@ function createFakeEnv({ collectionBody = VALID_COLLECTION_BODY, updateBody = VA
     collection_updates: [],
     rejected_updates: [],
     ingestion_log: [],
+    ingestion_queue: [],
   };
   const match = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
   const find = (arr, where) => arr.find((r) => match(r, where));
@@ -133,6 +134,24 @@ function createFakeEnv({ collectionBody = VALID_COLLECTION_BODY, updateBody = VA
               }
               if (sql.includes("INSERT OR IGNORE INTO ingestion_log")) {
                 state.ingestion_log.push({ args });
+                return { success: true };
+              }
+              if (sql.includes("INSERT INTO ingestion_queue")) {
+                const [
+                  inscriptionId, kind, network, enqueuedAt, retryAfter,
+                  lastError,
+                ] = args;
+                // Simulate ON CONFLICT DO UPDATE — replace if (id, kind) exists.
+                const idx = state.ingestion_queue.findIndex(
+                  (r) => r.inscription_id === inscriptionId && r.kind === kind,
+                );
+                const row = {
+                  inscription_id: inscriptionId, kind, network,
+                  enqueued_at: enqueuedAt, retry_after: retryAfter,
+                  attempts: 0, last_error: lastError ?? null,
+                };
+                if (idx >= 0) state.ingestion_queue[idx] = row;
+                else state.ingestion_queue.push(row);
                 return { success: true };
               }
               // Silently accept other statements — e.g. ingestion_log is
@@ -259,11 +278,12 @@ test("POST /api/collections: route network must be in body.networks", async () =
   });
   assert.equal(resp.status, 422);
   const body = await resp.json();
-  assert.equal(body.error, "network_mismatch");
+  assert.equal(body.error, "validation_failed");
+  assert.match(body.reason, /does not include route network/);
 });
 
-test("POST /api/collections: 404 content_host -> 202 queued", async () => {
-  const { env, fetchImpl } = createFakeEnv({
+test("POST /api/collections: 404 content_host -> 202 queued AND row enqueued", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
     contentOverrides: { [`https://mock-content-testnet/${COLL_ID}`]: 404 },
   });
   const resp = await fetchWorker({
@@ -274,6 +294,52 @@ test("POST /api/collections: 404 content_host -> 202 queued", async () => {
   assert.equal(resp.status, 202);
   const body = await resp.json();
   assert.equal(body.status, "queued");
+  // P1 fix: the 202 response now actually enqueues. The cron drain
+  // re-fetches + replays; a caller who sees 202 can forget about it.
+  assert.equal(state.ingestion_queue.length, 1);
+  assert.equal(state.ingestion_queue[0].kind, "collection");
+  assert.equal(state.ingestion_queue[0].inscription_id, COLL_ID);
+  assert.equal(state.ingestion_queue[0].network, "bells-testnet");
+});
+
+test("POST /api/collection-updates: 404 content_host -> 202 queued AND row enqueued", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: { [`https://mock-content-testnet/${UPDATE_ID}`]: 404 },
+  });
+  await registerRoot(env, fetchImpl);
+  const resp = await fetchWorker({
+    path: "/api/collection-updates",
+    body: { inscription_id: UPDATE_ID, network: "bells-testnet" },
+    env, fetchImpl,
+  });
+  assert.equal(resp.status, 202);
+  const body = await resp.json();
+  assert.equal(body.status, "queued");
+  assert.equal(state.ingestion_queue.length, 1);
+  assert.equal(state.ingestion_queue[0].kind, "collection_update");
+  assert.equal(state.ingestion_queue[0].inscription_id, UPDATE_ID);
+});
+
+test("POST /api/collection-updates: non-JSON content -> rejected_updates (P2 audit)", async () => {
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: { [`https://mock-content-testnet/${UPDATE_ID}`]: "not-json-garbage" },
+  });
+  await registerRoot(env, fetchImpl);
+  const resp = await fetchWorker({
+    path: "/api/collection-updates",
+    body: { inscription_id: UPDATE_ID, network: "bells-testnet" },
+    env, fetchImpl,
+  });
+  assert.equal(resp.status, 422);
+  const body = await resp.json();
+  assert.equal(body.error, "fetch_failed");
+  // Pre-schema failure still lands in rejected_updates with a null
+  // collection id so the audit trail is complete even when we have
+  // no parsed body to reference.
+  assert.equal(state.rejected_updates.length, 1);
+  assert.equal(state.rejected_updates[0].inscription_id, UPDATE_ID);
+  assert.equal(state.rejected_updates[0].collection_inscription_id, null);
+  assert.match(state.rejected_updates[0].reason, /fetch:/);
 });
 
 // =====================================================================

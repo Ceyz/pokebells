@@ -811,6 +811,32 @@ async function fetchInscriptionContent(env, inscriptionId, network) {
   return { raw, parsed };
 }
 
+// Shared validation + write pipeline for a fetched collection body.
+// Called by the POST handler (synchronous ingest) AND by
+// processQueueEntry (async drain after a 404 retry). Returns a
+// discriminated result so the caller can emit the right HTTP status
+// or queue action.
+async function applyCollectionIngestion(env, inscriptionId, network, raw, parsed) {
+  const validation = validateCollection(parsed);
+  if (!validation.ok) {
+    return { ok: false, stage: validation.stage, reason: validation.reason };
+  }
+  if (!validation.normalized.networks.includes(network)) {
+    return {
+      ok: false,
+      stage: "schema",
+      reason: `body.networks=${JSON.stringify(validation.normalized.networks)} does not include route network "${network}"`,
+    };
+  }
+  const initialRevealTxid = inscriptionId.replace(/i\d+$/i, "");
+  await registerCollectionRoot(env, {
+    inscriptionId, network,
+    bodyJson: raw,
+    initialRevealTxid,
+  });
+  return { ok: true, initialRevealTxid };
+}
+
 async function handlePostCollection(request, env) {
   let body;
   try { body = await request.json(); }
@@ -835,9 +861,15 @@ async function handlePostCollection(request, env) {
     ({ raw, parsed } = await fetchInscriptionContent(env, inscriptionId, network));
   } catch (e) {
     if (e.httpStatus === 404) {
-      await logIngestion(env, inscriptionId, "collection", network, "queued", "content_not_ready", ipPrefix);
+      // Real queue now: enqueue + the cron drain will retry the
+      // fetch+validate+register pipeline every few minutes. The
+      // caller sees 202 + status:"queued" and can forget about it.
+      await enqueueForIngestion(env, inscriptionId, "collection", network, {
+        lastError: e.message,
+      });
+      await logIngestion(env, inscriptionId, "collection", network, "queued", e.message, ipPrefix);
       return json(
-        { ok: true, status: "queued", reason: "content host not ready, retry later" },
+        { ok: true, status: "queued", reason: "content host not ready, queued for retry" },
         { status: 202 },
       );
     }
@@ -848,46 +880,17 @@ async function handlePostCollection(request, env) {
     );
   }
 
-  // STRICT validation — ingestion mode rejects REPLACE_ placeholders +
-  // empty app_manifest_ids (see validator.js validateCollection).
-  const validation = validateCollection(parsed);
-  if (!validation.ok) {
+  const ingest = await applyCollectionIngestion(env, inscriptionId, network, raw, parsed);
+  if (!ingest.ok) {
     await logIngestion(
       env, inscriptionId, "collection", network, "invalid",
-      `${validation.stage}:${validation.reason}`, ipPrefix,
+      `${ingest.stage}:${ingest.reason}`, ipPrefix,
     );
     return json(
-      { ok: false, error: "validation_failed", stage: validation.stage, reason: validation.reason },
+      { ok: false, error: "validation_failed", stage: ingest.stage, reason: ingest.reason },
       { status: 422 },
     );
   }
-
-  // Strict network compare: the body declares which networks it is
-  // canonical on. The route network must be one of them, otherwise
-  // we'd ingest a mainnet-only collection under testnet.
-  if (!validation.normalized.networks.includes(network)) {
-    await logIngestion(env, inscriptionId, "collection", network, "invalid", "network_mismatch", ipPrefix);
-    return json(
-      {
-        ok: false, error: "network_mismatch",
-        reason: `body.networks=${JSON.stringify(validation.normalized.networks)} does not include route network "${network}"`,
-      },
-      { status: 422 },
-    );
-  }
-
-  // The collection root's initial satpoint is (reveal_txid, 0). Every
-  // op:"collection_update" commit tx must spend from that location
-  // until the first update lands; then the new satpoint is derived
-  // from the update chain.
-  const initialRevealTxid = inscriptionId.replace(/i\d+$/i, "");
-
-  await registerCollectionRoot(env, {
-    inscriptionId,
-    network,
-    bodyJson: raw,
-    initialRevealTxid,
-  });
 
   await logIngestion(env, inscriptionId, "collection", network, "registered", null, ipPrefix);
   return json({
@@ -895,8 +898,91 @@ async function handlePostCollection(request, env) {
     status: "registered",
     inscription_id: inscriptionId,
     network,
-    initial_reveal_txid: initialRevealTxid,
+    initial_reveal_txid: ingest.initialRevealTxid,
   });
+}
+
+// Shared validation + authority + insert pipeline for a fetched
+// collection_update body. Returns a discriminated result so callers can
+// map to HTTP or queue actions. Writes to rejected_updates on failure
+// (audit trail). Caller is responsible for logIngestion.
+async function applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, raw, parsed) {
+  async function reject(reason, collectionId) {
+    await recordRejectedUpdate(env, {
+      inscriptionId,
+      collectionInscriptionId: collectionId ?? null,
+      network: routeNetwork,
+      reason,
+      rawBodyJson: raw ?? null,
+    });
+    return { ok: false, reason, collectionInscriptionId: collectionId ?? null };
+  }
+
+  const validation = validateCollectionUpdate(parsed);
+  if (!validation.ok) {
+    return reject(
+      `${validation.stage}:${validation.reason}`,
+      parsed?.collection_inscription_id ?? null,
+    );
+  }
+  const normalized = validation.normalized;
+
+  if (normalized.network !== routeNetwork) {
+    return reject(
+      `network_mismatch:body=${normalized.network},route=${routeNetwork}`,
+      normalized.collection_inscription_id,
+    );
+  }
+
+  const satpoint = await currentCollectionSatpoint(
+    env,
+    normalized.collection_inscription_id,
+    routeNetwork,
+  );
+  if (!satpoint) {
+    return reject("collection_not_registered", normalized.collection_inscription_id);
+  }
+
+  const expectedSequence = satpoint.lastSequence + 1;
+  if (normalized.update_sequence !== expectedSequence) {
+    return reject(
+      `sequence_not_sequential:got=${normalized.update_sequence},expected=${expectedSequence}`,
+      normalized.collection_inscription_id,
+    );
+  }
+
+  const auth = await verifyCollectionUpdateAuthority({
+    updateInscriptionId: inscriptionId,
+    expectedSatpoint: { revealTxid: satpoint.revealTxid, vout: satpoint.vout },
+    env,
+    network: routeNetwork,
+  });
+  if (!auth.ok) {
+    return reject(`${auth.stage}:${auth.reason}`, normalized.collection_inscription_id);
+  }
+
+  try {
+    await insertAcceptedCollectionUpdate(env, {
+      inscriptionId,
+      collectionInscriptionId: normalized.collection_inscription_id,
+      network: routeNetwork,
+      updateSequence: normalized.update_sequence,
+      setJson: JSON.stringify(normalized.set),
+      commitTxid: auth.commit_txid,
+      revealTxid: auth.reveal_txid,
+    });
+  } catch (e) {
+    return reject(`db_insert:${e.message}`, normalized.collection_inscription_id);
+  }
+
+  return {
+    ok: true,
+    collectionInscriptionId: normalized.collection_inscription_id,
+    updateSequence: normalized.update_sequence,
+    commitTxid: auth.commit_txid,
+    revealTxid: auth.reveal_txid,
+    authoritySkipped: auth.skipped === true,
+  };
 }
 
 async function handlePostCollectionUpdate(request, env) {
@@ -917,38 +1003,31 @@ async function handlePostCollectionUpdate(request, env) {
 
   const ipPrefix = clientIpPrefix(request);
 
-  // Single helper so every reject path writes the audit row AND logs +
-  // returns the same envelope. The worker never silently drops an
-  // invalid update; it either accepts or records a reason.
-  async function rejectAndRecord(reason, collectionId, rawBody, httpStatus = 422) {
-    await recordRejectedUpdate(env, {
-      inscriptionId,
-      collectionInscriptionId: collectionId ?? null,
-      network: routeNetwork,
-      reason,
-      rawBodyJson: rawBody ?? null,
-    });
-    await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "invalid", reason, ipPrefix);
-    return json(
-      { ok: false, error: "update_rejected", reason },
-      { status: httpStatus },
-    );
-  }
-
   let raw, parsed;
   try {
     ({ raw, parsed } = await fetchInscriptionContent(env, inscriptionId, routeNetwork));
   } catch (e) {
     if (e.httpStatus === 404) {
-      await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "queued", "content_not_ready", ipPrefix);
+      // Real queue. The cron drain re-fetches + replays the pipeline.
+      await enqueueForIngestion(env, inscriptionId, "collection_update", routeNetwork, {
+        lastError: e.message,
+      });
+      await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "queued", e.message, ipPrefix);
       return json(
-        { ok: true, status: "queued", reason: "content host not ready, retry later" },
+        { ok: true, status: "queued", reason: "content host not ready, queued for retry" },
         { status: 202 },
       );
     }
-    // Pre-schema failures don't get recorded in rejected_updates
-    // because we have no collection_inscription_id yet. Ingestion log
-    // carries the trace.
+    // Pre-schema failure (non-404 fetch error or non-JSON body). We
+    // have no collection_inscription_id yet but the rejected_updates
+    // table allows null + keeps the audit trail complete.
+    await recordRejectedUpdate(env, {
+      inscriptionId,
+      collectionInscriptionId: null,
+      network: routeNetwork,
+      reason: `fetch:${e.message}`,
+      rawBodyJson: null,
+    });
     await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "invalid", e.message, ipPrefix);
     return json(
       { ok: false, error: "fetch_failed", reason: e.message },
@@ -956,82 +1035,12 @@ async function handlePostCollectionUpdate(request, env) {
     );
   }
 
-  const validation = validateCollectionUpdate(parsed);
-  if (!validation.ok) {
-    return rejectAndRecord(
-      `${validation.stage}:${validation.reason}`,
-      parsed?.collection_inscription_id ?? null,
-      raw,
-    );
-  }
-  const normalized = validation.normalized;
-
-  // STRICT network compare — parsed.network is what the inscription
-  // body self-declares; routeNetwork is what the client claims the
-  // inscription lives on. Mismatch = refusal, never an implicit fix.
-  if (normalized.network !== routeNetwork) {
-    return rejectAndRecord(
-      `network_mismatch:body=${normalized.network},route=${routeNetwork}`,
-      normalized.collection_inscription_id,
-      raw,
-    );
-  }
-
-  const satpoint = await currentCollectionSatpoint(
-    env,
-    normalized.collection_inscription_id,
-    routeNetwork,
-  );
-  if (!satpoint) {
-    return rejectAndRecord(
-      "collection_not_registered",
-      normalized.collection_inscription_id,
-      raw,
-    );
-  }
-
-  // Sequence is cheaper than authority (no electrs fetch); check first.
-  const expectedSequence = satpoint.lastSequence + 1;
-  if (normalized.update_sequence !== expectedSequence) {
-    return rejectAndRecord(
-      `sequence_not_sequential:got=${normalized.update_sequence},expected=${expectedSequence}`,
-      normalized.collection_inscription_id,
-      raw,
-    );
-  }
-
-  const auth = await verifyCollectionUpdateAuthority({
-    updateInscriptionId: inscriptionId,
-    expectedSatpoint: { revealTxid: satpoint.revealTxid, vout: satpoint.vout },
-    env,
-    network: routeNetwork,
-  });
-  if (!auth.ok) {
-    return rejectAndRecord(
-      `${auth.stage}:${auth.reason}`,
-      normalized.collection_inscription_id,
-      raw,
-    );
-  }
-
-  // All checks passed. The DB helper re-runs currentCollectionSatpoint
-  // internally as a defense against concurrent inserts (TOCTOU) and
-  // will throw if the sequence moved between our check and this insert.
-  try {
-    await insertAcceptedCollectionUpdate(env, {
-      inscriptionId,
-      collectionInscriptionId: normalized.collection_inscription_id,
-      network: routeNetwork,
-      updateSequence: normalized.update_sequence,
-      setJson: JSON.stringify(normalized.set),
-      commitTxid: auth.commit_txid,
-      revealTxid: auth.reveal_txid,
-    });
-  } catch (e) {
-    return rejectAndRecord(
-      `db_insert:${e.message}`,
-      normalized.collection_inscription_id,
-      raw,
+  const ingest = await applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, raw, parsed);
+  if (!ingest.ok) {
+    await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "invalid", ingest.reason, ipPrefix);
+    return json(
+      { ok: false, error: "update_rejected", reason: ingest.reason },
+      { status: 422 },
     );
   }
 
@@ -1040,10 +1049,10 @@ async function handlePostCollectionUpdate(request, env) {
     ok: true,
     status: "accepted",
     inscription_id: inscriptionId,
-    update_sequence: normalized.update_sequence,
-    commit_txid: auth.commit_txid,
-    reveal_txid: auth.reveal_txid,
-    authority_skipped: auth.skipped === true,
+    update_sequence: ingest.updateSequence,
+    commit_txid: ingest.commitTxid,
+    reveal_txid: ingest.revealTxid,
+    authority_skipped: ingest.authoritySkipped,
   });
 }
 
@@ -1276,6 +1285,16 @@ async function processQueueEntry(env, entry) {
   if (kind === "mint" && await pokemonExists(env, id)) {
     await dequeueIngestion(env, id, kind); return "ok";
   }
+  // Phase B queue kinds — dedicated drain paths. fetchAndValidateInscription
+  // does not know about collection / collection_update, so we fetch +
+  // validate directly via the shared apply* helpers that the POST
+  // handlers also use.
+  if (kind === "collection") {
+    return await drainCollectionQueueEntry(env, entry);
+  }
+  if (kind === "collection_update") {
+    return await drainCollectionUpdateQueueEntry(env, entry);
+  }
 
   // Re-run the validator. If content is still 404, bump the retry
   // counter. Otherwise drop (permanent fail) or process.
@@ -1380,6 +1399,104 @@ async function processQueueEntry(env, entry) {
       nextQueueRetrySeconds(attempts + 1), e?.message ?? String(e));
     return "requeued";
   }
+}
+
+// =====================================================================
+// Phase B queue drain — collection + collection_update
+// =====================================================================
+// Short-circuits: if the row is already present in collections /
+// collection_updates, dequeue immediately (another path registered it).
+// Otherwise: fetch body, run the shared apply* helper, requeue on
+// still-fetching 404, dequeue on success or permanent validation fail.
+
+async function drainCollectionQueueEntry(env, entry) {
+  const { inscription_id: id, network, attempts } = entry;
+  if (await getCollectionRoot(env, id, network)) {
+    await dequeueIngestion(env, id, "collection");
+    return "ok";
+  }
+  let raw, parsed;
+  try {
+    ({ raw, parsed } = await fetchInscriptionContent(env, id, network));
+  } catch (e) {
+    if (e.httpStatus === 404) {
+      await bumpIngestionRetry(env, id, "collection",
+        nextQueueRetrySeconds(attempts + 1), e.message);
+      return "requeued";
+    }
+    await dequeueIngestion(env, id, "collection");
+    await logIngestion(env, id, "collection", network, "invalid_via_queue",
+      `fetch:${e.message}`, null);
+    return "dropped";
+  }
+  const ingest = await applyCollectionIngestion(env, id, network, raw, parsed);
+  if (!ingest.ok) {
+    await dequeueIngestion(env, id, "collection");
+    await logIngestion(env, id, "collection", network, "invalid_via_queue",
+      `${ingest.stage}:${ingest.reason}`, null);
+    return "dropped";
+  }
+  await dequeueIngestion(env, id, "collection");
+  await logIngestion(env, id, "collection", network, "ok_via_queue", null, null);
+  return "ok";
+}
+
+async function drainCollectionUpdateQueueEntry(env, entry) {
+  const { inscription_id: id, network, attempts } = entry;
+  // Short-circuit if the update has already been accepted via another
+  // path. Check collection_updates directly; a row there means we're
+  // done regardless of what other paths did.
+  const existing = await env.DB.prepare(
+    "SELECT 1 FROM collection_updates WHERE inscription_id = ? AND network = ? LIMIT 1",
+  ).bind(id, network).first();
+  if (existing) {
+    await dequeueIngestion(env, id, "collection_update");
+    return "ok";
+  }
+
+  let raw, parsed;
+  try {
+    ({ raw, parsed } = await fetchInscriptionContent(env, id, network));
+  } catch (e) {
+    if (e.httpStatus === 404) {
+      await bumpIngestionRetry(env, id, "collection_update",
+        nextQueueRetrySeconds(attempts + 1), e.message);
+      return "requeued";
+    }
+    // Permanent fetch failure — drop + record a rejected row so the
+    // audit trail survives even pre-schema failures via the queue.
+    await recordRejectedUpdate(env, {
+      inscriptionId: id,
+      collectionInscriptionId: null,
+      network,
+      reason: `fetch_via_queue:${e.message}`,
+      rawBodyJson: null,
+    });
+    await dequeueIngestion(env, id, "collection_update");
+    await logIngestion(env, id, "collection_update", network, "invalid_via_queue",
+      `fetch:${e.message}`, null);
+    return "dropped";
+  }
+
+  const ingest = await applyCollectionUpdateIngestion(env, id, network, raw, parsed);
+  if (!ingest.ok) {
+    // apply* already wrote to rejected_updates.
+    // Special case: collection_not_registered means the root hasn't been
+    // POSTed/ingested yet. Requeue rather than drop so ordering races
+    // (update arrives before root) can self-heal after a few retries.
+    if (ingest.reason === "collection_not_registered") {
+      await bumpIngestionRetry(env, id, "collection_update",
+        nextQueueRetrySeconds(attempts + 1), ingest.reason);
+      return "requeued";
+    }
+    await dequeueIngestion(env, id, "collection_update");
+    await logIngestion(env, id, "collection_update", network, "invalid_via_queue",
+      ingest.reason, null);
+    return "dropped";
+  }
+  await dequeueIngestion(env, id, "collection_update");
+  await logIngestion(env, id, "collection_update", network, "ok_via_queue", null, null);
+  return "ok";
 }
 
 // ======================================================================

@@ -458,10 +458,35 @@ Worker routes SHIPPED 2026-04-24 in `indexer/src/worker.js`:
   updates + stats + current_satpoint) or 404 if root not
   registered.
 
-12 smoke tests in `indexer/src/worker.test.js` exercise happy +
+15 smoke tests in `indexer/src/worker.test.js` exercise happy +
 reject paths end-to-end with a fake `globalThis.fetch` + in-memory
 DB mock (Node 18+ built-in Request/Response objects). indexer suite
-78 → 90 tests.
+78 → 92 tests.
+
+### Phase B round-3 fixes (2026-04-24)
+
+- **P1 — real queue on 404 content-host lag**. Earlier version of
+  the Phase B handlers returned `status: "queued"` on 404 but
+  never called `enqueueForIngestion`, so the 202 response was a
+  lie. Fixed: both `POST /api/collections` and
+  `POST /api/collection-updates` now enqueue with the correct
+  `kind` ("collection" / "collection_update") when the content
+  host 404s. `processQueueEntry` gained dedicated drain branches
+  (`drainCollectionQueueEntry`, `drainCollectionUpdateQueueEntry`)
+  that re-fetch + replay the shared `applyCollectionIngestion` /
+  `applyCollectionUpdateIngestion` helpers. The update drain
+  additionally requeues (not drops) on
+  `collection_not_registered` so a race where the update lands
+  before the root self-heals after a few cron ticks.
+- **P2 — pre-schema failures audited**. Fetch errors and
+  non-JSON bodies for `collection_update` now write a row to
+  `rejected_updates` with `collection_inscription_id = null` and
+  `reason: "fetch:<detail>"`. The table already tolerated a null
+  collection id; this makes the audit trail complete even for
+  malformed on-chain update attempts.
+- Shared `applyCollectionIngestion` /
+  `applyCollectionUpdateIngestion` helpers extracted from the
+  handler bodies so the POST and queue-drain paths stay in sync.
 
 ### Phase B deployment constraint (binding)
 
