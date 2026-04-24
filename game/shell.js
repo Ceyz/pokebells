@@ -4073,6 +4073,23 @@ async function runDirectMintFlow(attestation) {
   let row = await getPendingCapture(attestation);
   if (!row) throw new Error(`pending capture ${attestation} not found`);
 
+  // Short-circuit re-clicks after a successful mint: if the state
+  // machine already reached mint_confirmed, don't reload the inscriber
+  // bundle or re-trigger the wallet handshake. Just surface the success
+  // state again so the user knows there's nothing more to sign.
+  if (row.status === 'mint_confirmed') {
+    setMintStatusUi(
+      `Already minted ✓ ${row.preview_species_name ?? '?'} Lv.${row.preview_level ?? '?'}. `
+      + `Inscription: ${(row.mint_inscription_id ?? '').slice(0, 16)}…`,
+      'ok',
+    );
+    return row;
+  }
+  if (row.status === 'cancelled') {
+    setMintStatusUi('Capture was cancelled. Start a new catch to mint again.', 'warn');
+    return row;
+  }
+
   const electrsBase = electrsBaseFor(row.network);
   const signPsbt = (psbtBase64) =>
     window.nintondo.signPsbt(psbtBase64, { autoFinalized: true });
@@ -4392,12 +4409,29 @@ if (dom.captureHandoffModal.mintDirect) {
     }
     dom.captureHandoffModal.mintDirect.disabled = true;
     dom.captureHandoffModal.open.disabled = true;
+    let finalRow = null;
     try {
-      await runDirectMintFlow(view.attestation);
+      finalRow = await runDirectMintFlow(view.attestation);
     } catch (error) {
       setMintStatusUi(`Direct mint failed: ${error.message}`, 'err');
       log(`direct-mint failed: ${error.stack ?? error.message ?? error}`, 'bad');
-    } finally {
+      // Re-enable only on error so the user can retry from a recovery
+      // state (state machine skips already-signed popups).
+      dom.captureHandoffModal.mintDirect.disabled = false;
+      dom.captureHandoffModal.open.disabled = false;
+      return;
+    }
+    // Successful flow: keep the mint button DISABLED so a double-click
+    // can't re-enter an already-completed flow (which would otherwise
+    // reload the inscriber bundle + re-open the wallet handshake for
+    // nothing). Leave the companion-open button enabled so the user can
+    // still copy the inscription id or open the inscription URL.
+    if (finalRow?.status === 'mint_confirmed') {
+      dom.captureHandoffModal.mintDirect.disabled = true;
+      dom.captureHandoffModal.open.disabled = false;
+    } else {
+      // Flow returned without reaching mint_confirmed (partial broadcast,
+      // indexer notify queued, etc.). Allow retry.
       dom.captureHandoffModal.mintDirect.disabled = false;
       dom.captureHandoffModal.open.disabled = false;
     }
