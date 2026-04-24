@@ -974,6 +974,16 @@ export function validateCollectionUpdate(parsed) {
 // The caller must provide a fetchTx override in tests to exercise the
 // verification path without hitting the network.
 
+// Helper that stamps `transient` on reject results for the authority
+// stage. The caller uses this to decide retry vs permanent audit:
+//   - transient=true  → infra failure (electrs blip, content fetch
+//                       error, DB hiccup) — retry is appropriate.
+//   - transient=false → deterministic mismatch (wrong vin, wrong
+//                       satpoint, malformed tx) — audit + drop.
+function authReject(reason, { transient = false } = {}) {
+  return { ok: false, stage: "authority", reason, transient };
+}
+
 export async function verifyCollectionUpdateAuthority({
   updateInscriptionId,
   expectedSatpoint,
@@ -984,7 +994,7 @@ export async function verifyCollectionUpdateAuthority({
   if (!expectedSatpoint
       || typeof expectedSatpoint.revealTxid !== "string"
       || !Number.isInteger(expectedSatpoint.vout)) {
-    return reject("authority", "expectedSatpoint { revealTxid, vout } is required");
+    return authReject("expectedSatpoint { revealTxid, vout } is required");
   }
 
   if (!fetchTx) {
@@ -993,8 +1003,8 @@ export async function verifyCollectionUpdateAuthority({
       : env?.ELECTRS_BASE_TESTNET;
     if (!electrsBase) {
       if (network === "bells-mainnet") {
-        return reject(
-          "authority",
+        // Config error, not a transient blip — deploy is broken.
+        return authReject(
           "mainnet sat-spend authority check disabled (ELECTRS_BASE_MAINNET unset); refusing to fail-open on production network",
         );
       }
@@ -1018,30 +1028,27 @@ export async function verifyCollectionUpdateAuthority({
 
   const updateRevealTxid = String(updateInscriptionId ?? "").replace(/i\d+$/i, "");
   if (!/^[0-9a-f]{64}$/i.test(updateRevealTxid)) {
-    return reject("authority", `updateInscriptionId malformed: ${updateInscriptionId}`);
+    return authReject(`updateInscriptionId malformed: ${updateInscriptionId}`);
   }
 
+  // Fetch failures (network blip, electrs down, rate-limit) are
+  // explicitly transient. A retry later is the right move; don't poison
+  // rejected_updates with "permanent" markers for flaky infra.
   let revealTx;
   try { revealTx = await fetchTx(updateRevealTxid); }
-  catch (e) { return reject("authority", `reveal tx fetch: ${e.message}`); }
+  catch (e) { return authReject(`reveal tx fetch: ${e.message}`, { transient: true }); }
 
   const commitTxid = revealTx?.vin?.[0]?.txid;
   if (typeof commitTxid !== "string" || !commitTxid) {
-    return reject(
-      "authority",
-      `reveal tx ${updateRevealTxid} vin[0].txid missing`,
-    );
+    return authReject(`reveal tx ${updateRevealTxid} vin[0].txid missing`);
   }
 
   let commitTx;
   try { commitTx = await fetchTx(commitTxid); }
-  catch (e) { return reject("authority", `commit tx fetch: ${e.message}`); }
+  catch (e) { return authReject(`commit tx fetch: ${e.message}`, { transient: true }); }
 
   if (!Array.isArray(commitTx?.vin) || commitTx.vin.length === 0) {
-    return reject(
-      "authority",
-      `commit tx ${commitTxid} has no vin`,
-    );
+    return authReject(`commit tx ${commitTxid} has no vin`);
   }
 
   // v1 STRICT POSITION CHECK: the expected satpoint must be at
@@ -1057,13 +1064,11 @@ export async function verifyCollectionUpdateAuthority({
     && vinZero.txid === expectedSatpoint.revealTxid
     && vinZero.vout === expectedSatpoint.vout;
   if (!matchesAtZero) {
-    // Diagnostic: was the expected satpoint ANYWHERE in vin? Helps debug
-    // an operator who built a valid-but-wrong-position commit tx.
+    // Deterministic: the tx is on chain, the inputs are what they are.
     const anywhere = commitTx.vin.some(
       (v) => v && v.txid === expectedSatpoint.revealTxid && v.vout === expectedSatpoint.vout,
     );
-    return reject(
-      "authority",
+    return authReject(
       `commit tx ${commitTxid} vin[0] did not match expected satpoint `
         + `${expectedSatpoint.revealTxid}:${expectedSatpoint.vout} `
         + `(anywhere_in_vin=${anywhere}, inputs=${commitTx.vin.length}). `
@@ -1078,15 +1083,13 @@ export async function verifyCollectionUpdateAuthority({
   //  - reveal tx must have an output at index 0 (the inscription lives
   //    there after the reveal).
   if (revealTx.vin[0]?.vout !== 0) {
-    return reject(
-      "authority",
+    return authReject(
       `reveal tx ${updateRevealTxid} vin[0].vout must be 0 `
         + `(ordinals inscription convention; got ${revealTx.vin[0]?.vout})`,
     );
   }
   if (!Array.isArray(revealTx.vout) || revealTx.vout.length === 0) {
-    return reject(
-      "authority",
+    return authReject(
       `reveal tx ${updateRevealTxid} has no outputs — inscription has no destination`,
     );
   }

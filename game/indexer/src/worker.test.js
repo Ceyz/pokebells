@@ -390,7 +390,11 @@ test("POST /api/collection-updates: strict parsed.network !== routeNetwork -> re
   assert.match(state.rejected_updates[0].reason, /network_mismatch/);
 });
 
-test("POST /api/collection-updates: collection not registered -> reject", async () => {
+test("POST /api/collection-updates: collection_not_registered is transient (queued, not rejected)", async () => {
+  // Round-4 P2 fix: a collection root can arrive in a follow-up POST
+  // /api/collections after the update POST. Treating this as permanent
+  // would reject valid updates; it's transient. Drain retries until
+  // root registers or MAX_ATTEMPTS.
   const { env, state, fetchImpl } = createFakeEnv();
   // Skip registerRoot — collection doesn't exist in DB.
   const resp = await fetchWorker({
@@ -398,10 +402,13 @@ test("POST /api/collection-updates: collection not registered -> reject", async 
     body: { inscription_id: UPDATE_ID, network: "bells-testnet" },
     env, fetchImpl,
   });
-  assert.equal(resp.status, 422);
+  assert.equal(resp.status, 202);
   const body = await resp.json();
+  assert.equal(body.status, "queued");
   assert.match(body.reason, /collection_not_registered/);
-  assert.equal(state.rejected_updates.length, 1);
+  assert.equal(state.rejected_updates.length, 0, "must NOT write rejected_updates for retryable state");
+  assert.equal(state.ingestion_queue.length, 1);
+  assert.equal(state.ingestion_queue[0].kind, "collection_update");
 });
 
 test("POST /api/collection-updates: sequence gap -> reject", async () => {
@@ -420,7 +427,7 @@ test("POST /api/collection-updates: sequence gap -> reject", async () => {
   assert.equal(state.rejected_updates.length, 1);
 });
 
-test("POST /api/collection-updates: sat-spend at wrong vin position -> reject", async () => {
+test("POST /api/collection-updates: sat-spend at wrong vin position -> reject (permanent)", async () => {
   const { env, state, fetchImpl } = createFakeEnv({
     txOverrides: {
       [`https://mock-electrs-testnet/tx/${UPDATE_COMMIT_TXID}`]: {
@@ -440,7 +447,68 @@ test("POST /api/collection-updates: sat-spend at wrong vin position -> reject", 
   assert.equal(resp.status, 422);
   const body = await resp.json();
   assert.match(body.reason, /vin\[0\] did not match/);
-  assert.equal(state.rejected_updates.length, 1);
+  assert.equal(state.rejected_updates.length, 1, "deterministic mismatch writes audit row");
+  assert.equal(state.ingestion_queue.length, 0, "permanent failure must NOT enqueue");
+});
+
+test("POST /api/collection-updates: electrs blip on authority fetch is transient (queued)", async () => {
+  // Round-4 P1 fix: electrs outages should not permanently reject
+  // valid updates. Simulate the reveal tx fetch throwing (stands in for
+  // any electrs infra failure). Response must be 202 queued + NO
+  // rejected_updates row.
+  const { env, state, fetchImpl } = createFakeEnv();
+  // Override the authority fetcher to throw on the reveal tx request
+  // (which is what electrs would do during an outage).
+  const fetchWithElectrsBlip = async (url, opts) => {
+    const key = typeof url === "string" ? url : url.toString();
+    if (key === `https://mock-electrs-testnet/tx/${UPDATE_REVEAL_TXID}`) {
+      throw new Error("electrs connection refused");
+    }
+    return fetchImpl(url, opts);
+  };
+  await registerRoot(env, fetchImpl);
+  const resp = await fetchWorker({
+    path: "/api/collection-updates",
+    body: { inscription_id: UPDATE_ID, network: "bells-testnet" },
+    env, fetchImpl: fetchWithElectrsBlip,
+  });
+  assert.equal(resp.status, 202);
+  const body = await resp.json();
+  assert.equal(body.status, "queued");
+  assert.match(body.reason, /electrs connection refused/);
+  assert.equal(state.rejected_updates.length, 0, "infra blip must NOT write audit row");
+  assert.equal(state.ingestion_queue.length, 1);
+});
+
+test("POST /api/collection-updates: content host 5xx is transient (queued)", async () => {
+  // GPT round-4 P1: a transient 5xx from content host must not
+  // permanently reject. 404 already enqueues; 5xx and 502 are on the
+  // same retry path.
+  const { env, state, fetchImpl } = createFakeEnv({
+    contentOverrides: {
+      [`https://mock-content-testnet/${UPDATE_ID}`]: new Response("service unavailable", { status: 503 }),
+    },
+  });
+  await registerRoot(env, fetchImpl);
+  // Patch fetchImpl to serve the 503 directly for the update id.
+  const fetchWith503 = async (url, opts) => {
+    const key = typeof url === "string" ? url : url.toString();
+    if (key === `https://mock-content-testnet/${UPDATE_ID}`) {
+      return new Response("service unavailable", { status: 503 });
+    }
+    return fetchImpl(url, opts);
+  };
+  const resp = await fetchWorker({
+    path: "/api/collection-updates",
+    body: { inscription_id: UPDATE_ID, network: "bells-testnet" },
+    env, fetchImpl: fetchWith503,
+  });
+  assert.equal(resp.status, 202);
+  const body = await resp.json();
+  assert.equal(body.status, "queued");
+  assert.match(body.reason, /content_host_503/);
+  assert.equal(state.rejected_updates.length, 0);
+  assert.equal(state.ingestion_queue.length, 1);
 });
 
 // =====================================================================

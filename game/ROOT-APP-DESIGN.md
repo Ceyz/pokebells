@@ -463,6 +463,44 @@ reject paths end-to-end with a fake `globalThis.fetch` + in-memory
 DB mock (Node 18+ built-in Request/Response objects). indexer suite
 78 → 92 tests.
 
+### Phase B round-4 fixes (2026-04-24) — transient vs permanent
+
+GPT round-4 P1: earlier drain code dequeued on ANY non-404 fetch
+failure AND on any authority-stage failure, dropping valid updates
+during electrs / content-host blips. Fix: the failure model is now
+a 2-tier classification.
+
+**Transient failures → enqueue (POST) / bumpIngestionRetry (drain).
+Never writes rejected_updates.**
+
+- Content host 404, 5xx, DNS, timeout — retryable infra.
+- electrs fetch failure inside `verifyCollectionUpdateAuthority`
+  (reveal or commit tx fetch throws) — `authReject(…, { transient: true })`.
+- `collection_not_registered` — root may register later.
+- D1 insert error — likely a transient hiccup; UNIQUE violations
+  are caught by the drain's pre-check short-circuit on the next
+  pass.
+
+**Permanent failures → recordRejectedUpdate (if rejected_updates
+applies) + dequeue. Audit trail reflects only deterministic issues.**
+
+- Schema violation (wrong p/op/v, malformed set, bad inscription id).
+- `network_mismatch` between parsed body and route network.
+- `sequence_not_sequential` (chain ordering is fixed).
+- Authority mismatch at `vin[0]`, `vin[0].vout !== 0`, missing
+  `vout[0]` — inscription bytes are immutable, no retry will fix it.
+- `content_not_json` or `CONTENT_BASE_* unset` — marked
+  `err.permanent = true` inside `fetchInscriptionContent`.
+
+Result:
+- `rejected_updates` contains ONLY deterministic rejections →
+  audit trail is reliable.
+- `ingestion_queue` handles flaky infra via bounded retry
+  (`INGESTION_QUEUE_MAX_ATTEMPTS`) → valid-but-racing updates
+  self-heal.
+- Tests: 92 → 94 (added: electrs blip is transient, content 503 is
+  transient, collection_not_registered flipped from 422 to 202).
+
 ### Phase B round-3 fixes (2026-04-24)
 
 - **P1 — real queue on 404 content-host lag**. Earlier version of

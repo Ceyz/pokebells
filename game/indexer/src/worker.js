@@ -795,45 +795,72 @@ async function fetchInscriptionContent(env, inscriptionId, network) {
     ? env.CONTENT_BASE_MAINNET
     : env.CONTENT_BASE_TESTNET;
   if (!base) {
-    throw new Error(`CONTENT_BASE_${network === "bells-mainnet" ? "MAINNET" : "TESTNET"} unset`);
+    // Deployment / config bug — not a transient blip. Caller treats as
+    // permanent so it gets audited + returned to the operator instead
+    // of silently queued for retries that will all fail the same way.
+    const err = new Error(`CONTENT_BASE_${network === "bells-mainnet" ? "MAINNET" : "TESTNET"} unset`);
+    err.permanent = true;
+    throw err;
   }
   const url = `${base}${encodeURIComponent(inscriptionId)}`;
   const resp = await fetch(url, { cf: { cacheTtl: 60 } });
   if (!resp.ok) {
+    // 404 is the canonical "content host lag" case; 5xx / 429 are
+    // retryable infra blips. All HTTP errors are transient — bounded
+    // retry via INGESTION_QUEUE_MAX_ATTEMPTS covers the "truly gone"
+    // inscription case without polluting rejected_updates.
     const err = new Error(`content_host_${resp.status}`);
     err.httpStatus = resp.status;
     throw err;
   }
   const raw = await resp.text();
-  let parsed;
-  try { parsed = JSON.parse(raw); }
-  catch (e) { throw new Error(`content_not_json: ${e.message}`); }
-  return { raw, parsed };
+  try {
+    const parsed = JSON.parse(raw);
+    return { raw, parsed };
+  } catch (e) {
+    // Inscription bytes are immutable — bad JSON now means bad JSON
+    // forever. Permanent failure; audit + drop.
+    const err = new Error(`content_not_json: ${e.message}`);
+    err.permanent = true;
+    throw err;
+  }
 }
 
 // Shared validation + write pipeline for a fetched collection body.
 // Called by the POST handler (synchronous ingest) AND by
 // processQueueEntry (async drain after a 404 retry). Returns a
 // discriminated result so the caller can emit the right HTTP status
-// or queue action.
+// or queue action. `transient: true` ⇒ retry; `transient: false` ⇒
+// permanent deterministic failure (log invalid; no rejected_updates
+// table exists for collection roots, so just drop from the queue).
 async function applyCollectionIngestion(env, inscriptionId, network, raw, parsed) {
   const validation = validateCollection(parsed);
   if (!validation.ok) {
-    return { ok: false, stage: validation.stage, reason: validation.reason };
+    return {
+      ok: false, stage: validation.stage, reason: validation.reason,
+      transient: false,
+    };
   }
   if (!validation.normalized.networks.includes(network)) {
     return {
-      ok: false,
-      stage: "schema",
+      ok: false, stage: "schema",
       reason: `body.networks=${JSON.stringify(validation.normalized.networks)} does not include route network "${network}"`,
+      transient: false,
     };
   }
   const initialRevealTxid = inscriptionId.replace(/i\d+$/i, "");
-  await registerCollectionRoot(env, {
-    inscriptionId, network,
-    bodyJson: raw,
-    initialRevealTxid,
-  });
+  try {
+    await registerCollectionRoot(env, {
+      inscriptionId, network,
+      bodyJson: raw,
+      initialRevealTxid,
+    });
+  } catch (e) {
+    return {
+      ok: false, stage: "db", reason: `db_register:${e.message}`,
+      transient: true,
+    };
+  }
   return { ok: true, initialRevealTxid };
 }
 
@@ -860,19 +887,19 @@ async function handlePostCollection(request, env) {
   try {
     ({ raw, parsed } = await fetchInscriptionContent(env, inscriptionId, network));
   } catch (e) {
-    if (e.httpStatus === 404) {
-      // Real queue now: enqueue + the cron drain will retry the
-      // fetch+validate+register pipeline every few minutes. The
-      // caller sees 202 + status:"queued" and can forget about it.
+    if (!e.permanent) {
+      // Transient (404, 5xx, DNS, timeout). Enqueue; the cron drain
+      // retries up to INGESTION_QUEUE_MAX_ATTEMPTS with backoff.
       await enqueueForIngestion(env, inscriptionId, "collection", network, {
         lastError: e.message,
       });
       await logIngestion(env, inscriptionId, "collection", network, "queued", e.message, ipPrefix);
       return json(
-        { ok: true, status: "queued", reason: "content host not ready, queued for retry" },
+        { ok: true, status: "queued", reason: `transient fetch failure, queued: ${e.message}` },
         { status: 202 },
       );
     }
+    // Permanent fetch failure (non-JSON body, or CONTENT_BASE_* unset).
     await logIngestion(env, inscriptionId, "collection", network, "invalid", e.message, ipPrefix);
     return json(
       { ok: false, error: "fetch_failed", reason: e.message },
@@ -882,6 +909,17 @@ async function handlePostCollection(request, env) {
 
   const ingest = await applyCollectionIngestion(env, inscriptionId, network, raw, parsed);
   if (!ingest.ok) {
+    if (ingest.transient) {
+      // DB hiccup or similar — enqueue so the cron drain retries.
+      await enqueueForIngestion(env, inscriptionId, "collection", network, {
+        lastError: ingest.reason,
+      });
+      await logIngestion(env, inscriptionId, "collection", network, "queued", ingest.reason, ipPrefix);
+      return json(
+        { ok: true, status: "queued", reason: `transient failure, queued: ${ingest.reason}` },
+        { status: 202 },
+      );
+    }
     await logIngestion(
       env, inscriptionId, "collection", network, "invalid",
       `${ingest.stage}:${ingest.reason}`, ipPrefix,
@@ -903,34 +941,40 @@ async function handlePostCollection(request, env) {
 }
 
 // Shared validation + authority + insert pipeline for a fetched
-// collection_update body. Returns a discriminated result so callers can
-// map to HTTP or queue actions. Writes to rejected_updates on failure
-// (audit trail). Caller is responsible for logIngestion.
+// collection_update body. Returns a discriminated result so callers
+// can map to HTTP or queue actions. The caller (handler or drain) is
+// responsible for:
+//   - writing rejected_updates when the failure is PERMANENT
+//     (transient:false)
+//   - requeueing when the failure is TRANSIENT (transient:true)
+// Keeping that policy in the caller prevents stale rejected_updates
+// rows for retryable scenarios like "root not yet registered" or
+// "electrs blip".
 async function applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, raw, parsed) {
-  async function reject(reason, collectionId) {
-    await recordRejectedUpdate(env, {
-      inscriptionId,
+  function fail(reason, collectionId, transient) {
+    return {
+      ok: false, reason,
       collectionInscriptionId: collectionId ?? null,
-      network: routeNetwork,
-      reason,
-      rawBodyJson: raw ?? null,
-    });
-    return { ok: false, reason, collectionInscriptionId: collectionId ?? null };
+      transient: Boolean(transient),
+    };
   }
 
   const validation = validateCollectionUpdate(parsed);
   if (!validation.ok) {
-    return reject(
+    // Schema is deterministic — inscription bytes are immutable.
+    return fail(
       `${validation.stage}:${validation.reason}`,
       parsed?.collection_inscription_id ?? null,
+      /*transient*/ false,
     );
   }
   const normalized = validation.normalized;
 
   if (normalized.network !== routeNetwork) {
-    return reject(
+    return fail(
       `network_mismatch:body=${normalized.network},route=${routeNetwork}`,
       normalized.collection_inscription_id,
+      /*transient*/ false,
     );
   }
 
@@ -940,14 +984,25 @@ async function applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, 
     routeNetwork,
   );
   if (!satpoint) {
-    return reject("collection_not_registered", normalized.collection_inscription_id);
+    // Retryable: the root may register later in a follow-up POST
+    // /api/collections. The drain keeps retrying until max attempts
+    // (then abandons). No rejected_updates row — the update isn't
+    // really "rejected", it's just early.
+    return fail(
+      "collection_not_registered",
+      normalized.collection_inscription_id,
+      /*transient*/ true,
+    );
   }
 
   const expectedSequence = satpoint.lastSequence + 1;
   if (normalized.update_sequence !== expectedSequence) {
-    return reject(
+    // Chain ordering is fixed — a sequence gap on the inscription
+    // cannot fix itself. Permanent.
+    return fail(
       `sequence_not_sequential:got=${normalized.update_sequence},expected=${expectedSequence}`,
       normalized.collection_inscription_id,
+      /*transient*/ false,
     );
   }
 
@@ -958,7 +1013,13 @@ async function applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, 
     network: routeNetwork,
   });
   if (!auth.ok) {
-    return reject(`${auth.stage}:${auth.reason}`, normalized.collection_inscription_id);
+    // authReject propagates transient:true on electrs fetch blips,
+    // transient:false on deterministic vin/vout mismatches.
+    return fail(
+      `${auth.stage}:${auth.reason}`,
+      normalized.collection_inscription_id,
+      /*transient*/ auth.transient === true,
+    );
   }
 
   try {
@@ -972,7 +1033,15 @@ async function applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, 
       revealTxid: auth.reveal_txid,
     });
   } catch (e) {
-    return reject(`db_insert:${e.message}`, normalized.collection_inscription_id);
+    // DB errors: UNIQUE violations mean "already accepted by another
+    // path" and the drain's pre-check should short-circuit on the
+    // next pass. Any other D1 error is likely transient (timeout,
+    // cold start). Mark transient so the queue retries.
+    return fail(
+      `db_insert:${e.message}`,
+      normalized.collection_inscription_id,
+      /*transient*/ true,
+    );
   }
 
   return {
@@ -1007,20 +1076,19 @@ async function handlePostCollectionUpdate(request, env) {
   try {
     ({ raw, parsed } = await fetchInscriptionContent(env, inscriptionId, routeNetwork));
   } catch (e) {
-    if (e.httpStatus === 404) {
-      // Real queue. The cron drain re-fetches + replays the pipeline.
+    if (!e.permanent) {
+      // Transient (404, 5xx, DNS, timeout) — queue + 202.
       await enqueueForIngestion(env, inscriptionId, "collection_update", routeNetwork, {
         lastError: e.message,
       });
       await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "queued", e.message, ipPrefix);
       return json(
-        { ok: true, status: "queued", reason: "content host not ready, queued for retry" },
+        { ok: true, status: "queued", reason: `transient fetch failure, queued: ${e.message}` },
         { status: 202 },
       );
     }
-    // Pre-schema failure (non-404 fetch error or non-JSON body). We
-    // have no collection_inscription_id yet but the rejected_updates
-    // table allows null + keeps the audit trail complete.
+    // Permanent (non-JSON body or CONTENT_BASE_* unset). Audit with
+    // null collection_inscription_id since we have no parsed body.
     await recordRejectedUpdate(env, {
       inscriptionId,
       collectionInscriptionId: null,
@@ -1037,6 +1105,28 @@ async function handlePostCollectionUpdate(request, env) {
 
   const ingest = await applyCollectionUpdateIngestion(env, inscriptionId, routeNetwork, raw, parsed);
   if (!ingest.ok) {
+    if (ingest.transient) {
+      // Transient (electrs blip, DB hiccup, root not yet registered) —
+      // enqueue so the cron drain retries. Do NOT write rejected_updates;
+      // the update isn't really rejected, just deferred.
+      await enqueueForIngestion(env, inscriptionId, "collection_update", routeNetwork, {
+        lastError: ingest.reason,
+      });
+      await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "queued", ingest.reason, ipPrefix);
+      return json(
+        { ok: true, status: "queued", reason: `transient failure, queued: ${ingest.reason}` },
+        { status: 202 },
+      );
+    }
+    // Permanent (schema / network / sequence / authority mismatch) —
+    // audit trail + 422.
+    await recordRejectedUpdate(env, {
+      inscriptionId,
+      collectionInscriptionId: ingest.collectionInscriptionId,
+      network: routeNetwork,
+      reason: ingest.reason,
+      rawBodyJson: raw,
+    });
     await logIngestion(env, inscriptionId, "collection_update", routeNetwork, "invalid", ingest.reason, ipPrefix);
     return json(
       { ok: false, error: "update_rejected", reason: ingest.reason },
@@ -1419,11 +1509,16 @@ async function drainCollectionQueueEntry(env, entry) {
   try {
     ({ raw, parsed } = await fetchInscriptionContent(env, id, network));
   } catch (e) {
-    if (e.httpStatus === 404) {
+    if (!e.permanent) {
+      // Transient (404, 5xx, DNS, timeout). Bounded-retry via
+      // INGESTION_QUEUE_MAX_ATTEMPTS eventually abandons truly-gone
+      // inscriptions.
       await bumpIngestionRetry(env, id, "collection",
         nextQueueRetrySeconds(attempts + 1), e.message);
       return "requeued";
     }
+    // Permanent: non-JSON body or config bug. No rejected_updates
+    // table for collections, just drop + log.
     await dequeueIngestion(env, id, "collection");
     await logIngestion(env, id, "collection", network, "invalid_via_queue",
       `fetch:${e.message}`, null);
@@ -1431,6 +1526,13 @@ async function drainCollectionQueueEntry(env, entry) {
   }
   const ingest = await applyCollectionIngestion(env, id, network, raw, parsed);
   if (!ingest.ok) {
+    if (ingest.transient) {
+      await bumpIngestionRetry(env, id, "collection",
+        nextQueueRetrySeconds(attempts + 1), ingest.reason);
+      return "requeued";
+    }
+    // Permanent: no rejected_updates table for collection roots, just
+    // drop + log. The ingestion_log tells the operator why.
     await dequeueIngestion(env, id, "collection");
     await logIngestion(env, id, "collection", network, "invalid_via_queue",
       `${ingest.stage}:${ingest.reason}`, null);
@@ -1458,13 +1560,17 @@ async function drainCollectionUpdateQueueEntry(env, entry) {
   try {
     ({ raw, parsed } = await fetchInscriptionContent(env, id, network));
   } catch (e) {
-    if (e.httpStatus === 404) {
+    if (!e.permanent) {
+      // Transient (404, 5xx, DNS, timeout). Bounded-retry via
+      // INGESTION_QUEUE_MAX_ATTEMPTS eventually abandons truly-gone
+      // inscriptions.
       await bumpIngestionRetry(env, id, "collection_update",
         nextQueueRetrySeconds(attempts + 1), e.message);
       return "requeued";
     }
-    // Permanent fetch failure — drop + record a rejected row so the
-    // audit trail survives even pre-schema failures via the queue.
+    // Permanent fetch failure (non-JSON content, config bug). Audit +
+    // drop — the inscription is deterministically invalid, no retry
+    // will help.
     await recordRejectedUpdate(env, {
       inscriptionId: id,
       collectionInscriptionId: null,
@@ -1480,15 +1586,21 @@ async function drainCollectionUpdateQueueEntry(env, entry) {
 
   const ingest = await applyCollectionUpdateIngestion(env, id, network, raw, parsed);
   if (!ingest.ok) {
-    // apply* already wrote to rejected_updates.
-    // Special case: collection_not_registered means the root hasn't been
-    // POSTed/ingested yet. Requeue rather than drop so ordering races
-    // (update arrives before root) can self-heal after a few retries.
-    if (ingest.reason === "collection_not_registered") {
+    if (ingest.transient) {
+      // collection_not_registered (root will arrive), electrs blip,
+      // DB hiccup — retry. Never writes rejected_updates for these.
       await bumpIngestionRetry(env, id, "collection_update",
         nextQueueRetrySeconds(attempts + 1), ingest.reason);
       return "requeued";
     }
+    // Permanent: audit + dequeue.
+    await recordRejectedUpdate(env, {
+      inscriptionId: id,
+      collectionInscriptionId: ingest.collectionInscriptionId,
+      network,
+      reason: ingest.reason,
+      rawBodyJson: raw,
+    });
     await dequeueIngestion(env, id, "collection_update");
     await logIngestion(env, id, "collection_update", network, "invalid_via_queue",
       ingest.reason, null);
