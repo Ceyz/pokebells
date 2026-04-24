@@ -5030,4 +5030,31 @@ refreshWalletView().catch((error) => {
 });
 refreshPokeballStatus().catch(() => {});
 
+// When boot.js is in inscription mode and the main-manifest advertises a
+// rom_manifest_inscription_id, point the Manifest URL input at the
+// on-chain rom-manifest content URL by default instead of the local-dev
+// file. User can still override by typing a different URL + clicking
+// "Load manifest".
+(function prefillManifestUrlFromInscriptionMode() {
+  try {
+    const boot = window.PokeBellsBoot;
+    if (!boot || boot.mode !== 'inscription') return;
+    const romId = boot.manifest?.rom_manifest_inscription_id;
+    const base = boot.contentBase;
+    if (!romId || !base) return;
+    const onChainUrl = `${base}${romId}`;
+    // Only overwrite the default placeholder — don't clobber a URL the
+    // user might have typed into the input before this ran (unlikely
+    // pre-boot, but cheap safety).
+    if (!dom.manifestUrl) return;
+    const current = dom.manifestUrl.value.trim();
+    if (!current || current === 'manifest.local.json') {
+      dom.manifestUrl.value = onChainUrl;
+      log(`Inscription mode: using on-chain rom-manifest ${romId.slice(0, 16)}…`, 'ok');
+    }
+  } catch (e) {
+    console.warn('[shell] failed to resolve on-chain rom-manifest URL:', e?.message ?? e);
+  }
+})();
+
 run(() => loadManifestAndBoot(false));
