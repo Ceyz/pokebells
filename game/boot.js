@@ -319,6 +319,18 @@ async function boot() {
   const mode = detectMode();
   const contentBase = CONTENT_BASES[network] ?? CONTENT_BASES['bells-mainnet'];
 
+  // Tag the <body> so the stylesheet can collapse dev diagnostics
+  // (log panel, RAM probes, provider log, internal status fields) into
+  // a single collapsed <details> drawer. Local-dev mode keeps everything
+  // visible for debugging.
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.add(mode === 'inscription' ? 'mode-inscription' : 'mode-local');
+  } else if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => {
+      document.body.classList.add(mode === 'inscription' ? 'mode-inscription' : 'mode-local');
+    }, { once: true });
+  }
+
   let manifest = null;
   if (mode === 'inscription') {
     const manifestId = resolveManifestId(network);

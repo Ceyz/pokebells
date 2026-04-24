@@ -557,23 +557,50 @@
     @keyframes busy-spin {
       to { transform: rotate(360deg); }
     }
+
+    /* ==========================================================
+       Player-clean mode: when boot.js detects inscription mode it
+       adds `mode-inscription` to <body>, collapsing all developer
+       diagnostics into a tiny "Developer panel" <details> at the
+       bottom so players don't see raw JSON, RAM probes, provider
+       logs, or the manifest URL textbox. Local dev mode (no
+       ?manifest=...) keeps everything visible.
+       ========================================================== */
+    body.mode-inscription .dev-only { display: none; }
+    body.mode-inscription h1 { font-size: 22px; margin: 6px 0 2px; }
+    body.mode-inscription > main.layout > section.band.band-header { padding: 10px 14px; }
+    body.mode-inscription > main.layout > section.band.band-header .subline { display: none; }
+    body.mode-inscription > main.layout > section.band.band-header .controls { gap: 6px; }
+    body.mode-inscription > main.layout > section.band.band-header .controls > .dev-only { display: none; }
+    body.mode-inscription .wallet-panel .status-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+    body.mode-inscription .wallet-panel .status-item.dev-only { display: none; }
+    body.mode-inscription details.dev-drawer { display: block; margin: 20px 0 8px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--panel); }
+    body.mode-inscription details.dev-drawer[open] { padding: 12px 14px; }
+    body.mode-inscription details.dev-drawer summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 500; user-select: none; }
+    body.mode-inscription details.dev-drawer summary:hover { color: var(--text); }
+    body.mode-inscription details.dev-drawer > :not(summary) { margin-top: 10px; }
+    body.mode-inscription details.dev-drawer .band { padding: 8px 12px; background: var(--panel-2); margin-bottom: 8px; }
+    body.mode-inscription details.dev-drawer .band h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0 0 6px; }
+    /* Hide drawer in local-dev mode — it's only a compact wrapper for
+       inscription-mode; dev mode shows sections inline above. */
+    details.dev-drawer { display: none; }
   </style>
 </head>
 <body>
   <main class="layout">
-    <section class="band">
-      <h1>PokeBells Phase 1</h1>
-      <p class="subline">Manifest-driven ROM loading, chunk reassembly, durable cache when available, then boot via binjgb.</p>
+    <section class="band band-header">
+      <h1>PokeBells</h1>
+      <p class="subline dev-only">Manifest-driven ROM loading, chunk reassembly, durable cache when available, then boot via binjgb.</p>
       <div class="controls">
-        <input id="manifest-url" class="manifest-input" type="text" value="manifest.local.json" aria-label="Manifest URL">
-        <button id="load-manifest">Load manifest</button>
-        <button id="clear-cache">Clear cache</button>
-        <button id="copy-durable-url">Copy durable URL</button>
+        <input id="manifest-url" class="manifest-input dev-only" type="text" value="manifest.local.json" aria-label="Manifest URL">
+        <button id="load-manifest" class="dev-only">Load manifest</button>
+        <button id="clear-cache" class="dev-only">Clear cache</button>
+        <button id="copy-durable-url" class="dev-only">Copy durable URL</button>
         <button id="open-companion">Open companion</button>
       </div>
     </section>
 
-    <section class="band">
+    <section class="band dev-only">
       <h2>Phase 1 Status</h2>
         <div class="status-grid">
           <div class="status-item"><div class="status-label">Manifest</div><div id="status-manifest" class="status-value">Waiting</div></div>
@@ -587,7 +614,7 @@
         </div>
       </section>
 
-    <section class="band">
+    <section class="band dev-only">
       <h2>Live RAM</h2>
       <div class="data-grid">
         <div class="data-item"><div class="data-label">Team Count</div><div id="live-team-count" class="data-value">--</div></div>
@@ -599,45 +626,45 @@
       </div>
     </section>
 
-    <section class="band">
+    <section class="band dev-only">
       <h2>Last Capture Payload</h2>
       <pre id="capture-json" class="log">No capture yet.</pre>
     </section>
 
-    <section class="band">
+    <section class="band wallet-panel">
       <h2>Wallet</h2>
       <div class="controls">
-        <select id="wallet-adapter-select" class="manifest-input" aria-label="Wallet adapter">
+        <select id="wallet-adapter-select" class="manifest-input dev-only" aria-label="Wallet adapter">
           <option value="mock">Mock offline adapter</option>
           <option value="nintondo">Nintondo extension</option>
         </select>
-        <button id="load-dev-save">Load dev save</button>
+        <button id="load-dev-save" class="dev-only">Load dev save</button>
         <button id="wallet-connect">Connect wallet</button>
-        <button id="wallet-probe">Probe provider</button>
-        <button id="wallet-sign-test">Sign test message</button>
-        <button id="wallet-mint">Mint last capture</button>
-        <button id="wallet-sync-pc">Sync wallet to PC</button>
-        <button id="wallet-reset">Reset adapter</button>
+        <button id="wallet-probe" class="dev-only">Probe provider</button>
+        <button id="wallet-sign-test" class="dev-only">Sign test message</button>
+        <button id="wallet-mint" class="dev-only">Mint last capture</button>
+        <button id="wallet-sync-pc" class="dev-only">Sync wallet to PC</button>
+        <button id="wallet-reset" class="dev-only">Reset adapter</button>
       </div>
       <div class="status-grid">
-        <div class="status-item"><div class="status-label">Adapter</div><div id="wallet-adapter" class="status-value">Mock offline adapter</div></div>
-        <div class="status-item"><div class="status-label">Availability</div><div id="wallet-availability" class="status-value">Ready</div></div>
+        <div class="status-item dev-only"><div class="status-label">Adapter</div><div id="wallet-adapter" class="status-value">Mock offline adapter</div></div>
+        <div class="status-item dev-only"><div class="status-label">Availability</div><div id="wallet-availability" class="status-value">Ready</div></div>
         <div class="status-item"><div class="status-label">Wallet</div><div id="wallet-address" class="status-value">Disconnected</div></div>
         <div class="status-item"><div class="status-label">Balance</div><div id="wallet-balance" class="status-value">--</div></div>
         <div class="status-item"><div class="status-label">Network</div><div id="wallet-network" class="status-value">bells-testnet</div></div>
-        <div class="status-item"><div class="status-label">Provider API</div><div id="wallet-provider-path" class="status-value">--</div></div>
-        <div class="status-item"><div class="status-label">Provider Ver</div><div id="wallet-provider-version" class="status-value">--</div></div>
-        <div class="status-item"><div class="status-label">Account Name</div><div id="wallet-account-name" class="status-value">--</div></div>
-        <div class="status-item"><div class="status-label">Signature</div><div id="wallet-signature-status" class="status-value">None</div></div>
+        <div class="status-item dev-only"><div class="status-label">Provider API</div><div id="wallet-provider-path" class="status-value">--</div></div>
+        <div class="status-item dev-only"><div class="status-label">Provider Ver</div><div id="wallet-provider-version" class="status-value">--</div></div>
+        <div class="status-item dev-only"><div class="status-label">Account Name</div><div id="wallet-account-name" class="status-value">--</div></div>
+        <div class="status-item dev-only"><div class="status-label">Signature</div><div id="wallet-signature-status" class="status-value">None</div></div>
         <div class="status-item"><div class="status-label">Owned Pokemon</div><div id="wallet-owned-count" class="status-value">0</div></div>
         <div class="status-item"><div class="status-label">Party</div><div id="wallet-party-count" class="status-value">0 / 6</div></div>
         <div class="status-item"><div class="status-label">Boxed</div><div id="wallet-boxed-count" class="status-value">0</div></div>
         <div class="status-item"><div class="status-label">Boxes</div><div id="wallet-box-count" class="status-value">1</div></div>
         <div class="status-item"><div class="status-label">Last Mint</div><div id="wallet-last-mint" class="status-value">None</div></div>
-        <div class="status-item"><div class="status-label">Mint Flow</div><div id="wallet-mint-phase" class="status-value">Idle</div></div>
-        <div class="status-item"><div class="status-label">Mint Quote</div><div id="wallet-mint-quote" class="status-value">--</div></div>
-        <div class="status-item"><div class="status-label">Mint Tx</div><div id="wallet-mint-tx" class="status-value">--</div></div>
-        <div class="status-item"><div class="status-label">PC Sync</div><div id="wallet-pc-sync" class="status-value">Waiting for a save file.</div></div>
+        <div class="status-item dev-only"><div class="status-label">Mint Flow</div><div id="wallet-mint-phase" class="status-value">Idle</div></div>
+        <div class="status-item dev-only"><div class="status-label">Mint Quote</div><div id="wallet-mint-quote" class="status-value">--</div></div>
+        <div class="status-item dev-only"><div class="status-label">Mint Tx</div><div id="wallet-mint-tx" class="status-value">--</div></div>
+        <div class="status-item dev-only"><div class="status-label">PC Sync</div><div id="wallet-pc-sync" class="status-value">Waiting for a save file.</div></div>
         <div class="status-item"><div class="status-label">$POKEBALL cooldown</div><div id="wallet-pokeball" class="status-value">Ready (stub)</div></div>
       </div>
       <div class="section-head">
@@ -650,12 +677,12 @@
         <div id="wallet-box-meta" class="section-meta">0 boxed across 1 box</div>
       </div>
       <div id="owned-boxes" class="box-list"></div>
-      <div class="section-head">
+      <div class="section-head dev-only">
         <div class="section-title">Provider Diagnostics</div>
         <div class="section-meta">Read-only probe + optional signature challenge</div>
       </div>
-      <pre id="wallet-provider-log" class="log">No provider probe yet.</pre>
-      <pre id="owned-pokemon" class="log">No mock mints yet.</pre>
+      <pre id="wallet-provider-log" class="log dev-only">No provider probe yet.</pre>
+      <pre id="owned-pokemon" class="log dev-only">No mock mints yet.</pre>
     </section>
 
     <section class="shell">
@@ -682,7 +709,7 @@
           <div id="screen-overlay" class="overlay">No ROM booted yet.</div>
         </div>
         <div class="controls">
-          <button id="reload-rom">Rebuild from manifest</button>
+          <button id="reload-rom" class="dev-only">Rebuild from manifest</button>
           <button id="toggle-fullscreen">Fullscreen</button>
           <button id="sync-save" disabled title="Save in-game first (Start→SAVE), then click to inscribe your save on-chain so it's portable across devices.">Sync save to chain</button>
           <button id="restore-save" class="hidden" title="Restore a previously inscribed save from the chain.">Restore save from chain</button>
@@ -712,11 +739,20 @@
         <p class="subline">Keyboard: arrows, Z/B, X/A, Enter/Start, Shift/Select.</p>
       </section>
 
-      <section class="band">
+      <section class="band dev-only">
         <h2>Loader Log</h2>
         <pre id="log" class="log"></pre>
       </section>
     </section>
+
+    <!-- Developer drawer: collapsed by default in inscription mode. Gives
+         power users a way to inspect the log + provider diagnostics without
+         cluttering the standard player view. Hidden entirely in local-dev
+         mode because that mode already shows the sections inline above. -->
+    <details class="dev-drawer">
+      <summary>Developer panel (advanced) — loader log, RAM probes</summary>
+      <p class="muted" style="font-size: 11px; margin: 8px 0 0;">Live game diagnostics for debugging. Not needed for normal play — all core UI (wallet, party, boxes, save, mint) is above.</p>
+    </details>
   </main>
 
   <div id="mint-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mint-modal-title">
