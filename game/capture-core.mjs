@@ -2102,6 +2102,120 @@ export async function validatePokemonMintRecord(mintRecord, commitRecord, option
 }
 
 // ============================================================================
+// SECTION: op:"collection_update" body builder (Phase B)
+// ============================================================================
+//
+// Canonical body for an append-only pointer bump to a pokebells-collection
+// root. Authority is sat-spend-v1 — the OPERATOR is responsible for
+// constructing a commit tx that spends the current collection root
+// satpoint (see game/ROOT-APP-DESIGN.md). The builder alone does NOT
+// enforce that; the indexer's verifyCollectionUpdateAuthority at ingestion
+// time is the authoritative gate (fail-closed).
+
+export const COLLECTION_UPDATE_OP = 'collection_update';
+export const COLLECTION_UPDATE_V = 1;
+
+// v1 allowlist of keys in `set`. Lists only — prepend-semantics. Scalar
+// replacement requires minting a new collection root (see design doc).
+export const COLLECTION_UPDATE_PREPEND_KEYS = Object.freeze([
+  'app_manifest_ids_prepend',
+  'root_app_urls_prepend',
+  'indexer_urls_prepend',
+  'companion_urls_prepend',
+  'bridge_urls_prepend',
+]);
+
+const COLLECTION_UPDATE_NETWORKS = Object.freeze([
+  'bells-mainnet', 'bells-testnet',
+]);
+const COLLECTION_UPDATE_INSCRIPTION_ID_RE = /^[0-9a-f]{64}i\d+$/i;
+const COLLECTION_UPDATE_URL_RE = /^https?:\/\/[^\s]+$/;
+
+export function buildCollectionUpdateRecord({
+  network,
+  collectionInscriptionId,
+  updateSequence,
+  set,
+  now = new Date().toISOString(),
+}) {
+  if (!COLLECTION_UPDATE_NETWORKS.includes(network)) {
+    throw new Error(
+      `buildCollectionUpdateRecord: unsupported network "${network}"`,
+    );
+  }
+  if (typeof collectionInscriptionId !== 'string'
+      || !COLLECTION_UPDATE_INSCRIPTION_ID_RE.test(collectionInscriptionId)) {
+    throw new Error(
+      'buildCollectionUpdateRecord: collectionInscriptionId must be a full inscription id (64 hex + iN)',
+    );
+  }
+  if (!Number.isInteger(updateSequence) || updateSequence < 1) {
+    throw new Error(
+      'buildCollectionUpdateRecord: updateSequence must be a positive integer',
+    );
+  }
+  if (!set || typeof set !== 'object' || Array.isArray(set)) {
+    throw new Error(
+      'buildCollectionUpdateRecord: set must be a non-null plain object',
+    );
+  }
+  const setKeys = Object.keys(set);
+  if (setKeys.length === 0) {
+    throw new Error(
+      'buildCollectionUpdateRecord: set must contain at least one *_prepend key',
+    );
+  }
+  const clonedSet = {};
+  for (const key of setKeys) {
+    if (!COLLECTION_UPDATE_PREPEND_KEYS.includes(key)) {
+      throw new Error(
+        `buildCollectionUpdateRecord: set key "${key}" not in v1 allowlist `
+        + `(${COLLECTION_UPDATE_PREPEND_KEYS.join(', ')})`,
+      );
+    }
+    const value = set[key];
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new Error(
+        `buildCollectionUpdateRecord: set.${key} must be a non-empty array`,
+      );
+    }
+    // Shape of list items depends on the key: *_urls must be URL strings,
+    // *_ids must be inscription ids.
+    if (key === 'app_manifest_ids_prepend') {
+      for (let i = 0; i < value.length; i += 1) {
+        if (typeof value[i] !== 'string'
+            || !COLLECTION_UPDATE_INSCRIPTION_ID_RE.test(value[i])) {
+          throw new Error(
+            `buildCollectionUpdateRecord: set.${key}[${i}] must be an inscription id`,
+          );
+        }
+      }
+    } else {
+      for (let i = 0; i < value.length; i += 1) {
+        if (typeof value[i] !== 'string'
+            || !COLLECTION_UPDATE_URL_RE.test(value[i])) {
+          throw new Error(
+            `buildCollectionUpdateRecord: set.${key}[${i}] must be an http(s) URL`,
+          );
+        }
+      }
+    }
+    clonedSet[key] = [...value];
+  }
+
+  return {
+    p: 'pokebells',
+    op: COLLECTION_UPDATE_OP,
+    v: COLLECTION_UPDATE_V,
+    network,
+    collection_inscription_id: collectionInscriptionId,
+    update_sequence: updateSequence,
+    issued_at: now,
+    set: clonedSet,
+  };
+}
+
+// ============================================================================
 // SECTION: Inscription-call safety (P0 #6 PSBT safety, pre-build half)
 // ============================================================================
 //
@@ -2244,6 +2358,9 @@ const browserExports = {
   WRAM_BANK1_START,
   WRAM_BYTE_LENGTH,
   WRAM_START,
+  COLLECTION_UPDATE_OP,
+  COLLECTION_UPDATE_PREPEND_KEYS,
+  COLLECTION_UPDATE_V,
   INSCRIBE_FEE_RATE_DEFAULT,
   INSCRIBE_FEE_RATE_MAX,
   INSCRIBE_FEE_RATE_MIN,
@@ -2259,6 +2376,7 @@ const browserExports = {
   SAVE_SNAPSHOT_SCHEME,
   buildCaptureCommitRecord,
   buildCaptureProvenance,
+  buildCollectionUpdateRecord,
   buildCapturedPokemonRecord,
   buildEvolveRecord,
   buildPokemonMintRecord,

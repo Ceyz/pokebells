@@ -29,6 +29,10 @@ import {
   assertInscribeCallSafe,
   assertMultiTabWriter,
   buildCaptureCommitRecord,
+  buildCollectionUpdateRecord,
+  COLLECTION_UPDATE_OP,
+  COLLECTION_UPDATE_PREPEND_KEYS,
+  COLLECTION_UPDATE_V,
   buildCaptureProvenance,
   buildCapturedPokemonRecord,
   buildPokemonMintRecord,
@@ -1513,4 +1517,155 @@ test('assertMultiTabWriter message is actionable', () => {
     assert.match(e.message, /Close the other tab/);
     assert.match(e.message, /refresh here/);
   }
+});
+
+// ============================================================================
+// Phase B: op:"collection_update" body builder
+// ============================================================================
+
+const COLLECTION_ROOT_FIXTURE_ID = `${'1'.repeat(64)}i0`;
+const MANIFEST_ID_FIXTURE = `${'2'.repeat(64)}i0`;
+const ROOT_URL_FIXTURE = 'https://bells-testnet-content.nintondo.io/content/abc123i0';
+
+function makeValidCollectionUpdate(overrides = {}) {
+  return {
+    network: 'bells-testnet',
+    collectionInscriptionId: COLLECTION_ROOT_FIXTURE_ID,
+    updateSequence: 3,
+    set: { app_manifest_ids_prepend: [MANIFEST_ID_FIXTURE] },
+    now: '2026-06-01T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('buildCollectionUpdateRecord produces canonical body', () => {
+  const r = buildCollectionUpdateRecord(makeValidCollectionUpdate());
+  assert.equal(r.p, 'pokebells');
+  assert.equal(r.op, COLLECTION_UPDATE_OP);
+  assert.equal(r.op, 'collection_update');
+  assert.equal(r.v, COLLECTION_UPDATE_V);
+  assert.equal(r.v, 1);
+  assert.equal(r.network, 'bells-testnet');
+  assert.equal(r.collection_inscription_id, COLLECTION_ROOT_FIXTURE_ID);
+  assert.equal(r.update_sequence, 3);
+  assert.equal(r.issued_at, '2026-06-01T12:00:00.000Z');
+  assert.deepEqual(r.set, { app_manifest_ids_prepend: [MANIFEST_ID_FIXTURE] });
+});
+
+test('buildCollectionUpdateRecord accepts URL-list keys', () => {
+  const r = buildCollectionUpdateRecord(makeValidCollectionUpdate({
+    set: {
+      indexer_urls_prepend: ['https://new-indexer.example/'],
+      root_app_urls_prepend: [ROOT_URL_FIXTURE],
+    },
+  }));
+  assert.deepEqual(r.set.indexer_urls_prepend, ['https://new-indexer.example/']);
+  assert.deepEqual(r.set.root_app_urls_prepend, [ROOT_URL_FIXTURE]);
+});
+
+test('buildCollectionUpdateRecord rejects unsupported network', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ network: 'btc-mainnet' })),
+    /unsupported network/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects malformed collectionInscriptionId', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ collectionInscriptionId: 'not-an-id' })),
+    /inscription id/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ collectionInscriptionId: null })),
+    /inscription id/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects non-positive updateSequence', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ updateSequence: 0 })),
+    /positive integer/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ updateSequence: -1 })),
+    /positive integer/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ updateSequence: 1.5 })),
+    /positive integer/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects empty or non-object set', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ set: null })),
+    /set must be a non-null plain object/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ set: [] })),
+    /set must be a non-null plain object/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({ set: {} })),
+    /at least one \*_prepend key/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects set keys outside the v1 allowlist', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({
+      set: { slug: 'new-slug' },  // scalar — must require new root, not an update
+    })),
+    /not in v1 allowlist/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({
+      set: { indexer_urls: ['https://x.example/'] },  // missing _prepend suffix
+    })),
+    /not in v1 allowlist/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects set values that are not non-empty arrays', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({
+      set: { app_manifest_ids_prepend: 'not an array' },
+    })),
+    /non-empty array/,
+  );
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({
+      set: { app_manifest_ids_prepend: [] },
+    })),
+    /non-empty array/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects non-inscription-id entries in app_manifest_ids_prepend', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({
+      set: { app_manifest_ids_prepend: ['not-an-id'] },
+    })),
+    /must be an inscription id/,
+  );
+});
+
+test('buildCollectionUpdateRecord rejects non-URL entries in *_urls_prepend', () => {
+  assert.throws(
+    () => buildCollectionUpdateRecord(makeValidCollectionUpdate({
+      set: { indexer_urls_prepend: ['not-a-url'] },
+    })),
+    /must be an http\(s\) URL/,
+  );
+});
+
+test('buildCollectionUpdateRecord deep-copies set values (mutation safety)', () => {
+  const originalSet = { app_manifest_ids_prepend: [MANIFEST_ID_FIXTURE] };
+  const r = buildCollectionUpdateRecord(makeValidCollectionUpdate({ set: originalSet }));
+  originalSet.app_manifest_ids_prepend.push(`${'e'.repeat(64)}i0`);
+  assert.equal(r.set.app_manifest_ids_prepend.length, 1, 'mutation should not leak into the built record');
+});
+
+test('COLLECTION_UPDATE_PREPEND_KEYS is frozen', () => {
+  assert.throws(() => COLLECTION_UPDATE_PREPEND_KEYS.push('evil_scalar'));
 });

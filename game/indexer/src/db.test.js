@@ -12,7 +12,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { insertPokemon, isStarterRaceError } from "./db.js";
+import {
+  insertPokemon, isStarterRaceError,
+  registerCollectionRoot, getCollectionRoot,
+  insertAcceptedCollectionUpdate, recordRejectedUpdate,
+  currentCollectionSatpoint, aggregatedCollectionLatest,
+} from "./db.js";
 
 function makeNormalized(overrides = {}) {
   return {
@@ -182,4 +187,318 @@ test("isStarterRaceError: inspects e.cause.message when D1 wraps the error", () 
     "UNIQUE constraint failed: idx_pokemon_starter_unique"
   );
   assert.equal(isStarterRaceError(wrapped), true);
+});
+
+// ============================================================================
+// Phase B: collection + collection_updates DB helpers
+// ============================================================================
+// In-memory D1 mock for the collection tables. Mirrors the SQL shape in
+// schema.sql — INSERT OR IGNORE + UNIQUE constraint behaviour included.
+
+function createCollectionEnv() {
+  const state = {
+    collections: [],
+    collection_updates: [],
+    rejected_updates: [],
+  };
+  const match = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+  const find = (arr, where) => arr.find((r) => match(r, where));
+  const filter = (arr, where) => arr.filter((r) => match(r, where));
+
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...args) {
+          return {
+            async first() {
+              if (sql.includes("FROM collections") && sql.includes("WHERE inscription_id")) {
+                const [id, net] = args;
+                return find(state.collections, {
+                  inscription_id: id, network: net,
+                }) ?? null;
+              }
+              if (sql.includes("FROM collection_updates")
+                  && sql.includes("ORDER BY update_sequence DESC")) {
+                const [id, net] = args;
+                const rows = filter(state.collection_updates, {
+                  collection_inscription_id: id, network: net,
+                }).sort((a, b) => b.update_sequence - a.update_sequence);
+                return rows[0] ?? null;
+              }
+              return null;
+            },
+            async all() {
+              if (sql.includes("FROM collection_updates")
+                  && sql.includes("ORDER BY update_sequence ASC")) {
+                const [id, net] = args;
+                const rows = filter(state.collection_updates, {
+                  collection_inscription_id: id, network: net,
+                }).sort((a, b) => a.update_sequence - b.update_sequence);
+                return { results: [...rows] };
+              }
+              return { results: [] };
+            },
+            async run() {
+              if (sql.includes("INSERT OR IGNORE INTO collections")) {
+                const [id, net, body, initialRevealTxid, registeredAt] = args;
+                if (!find(state.collections, { inscription_id: id, network: net })) {
+                  state.collections.push({
+                    inscription_id: id, network: net, body_json: body,
+                    initial_reveal_txid: initialRevealTxid,
+                    registered_at: registeredAt,
+                  });
+                }
+                return { success: true };
+              }
+              if (sql.includes("INSERT INTO collection_updates")) {
+                const [
+                  inscriptionId, collectionId, network, updateSequence,
+                  setJson, commitTxid, revealTxid, acceptedAt,
+                ] = args;
+                const dup = find(state.collection_updates, {
+                  collection_inscription_id: collectionId,
+                  network, update_sequence: updateSequence,
+                });
+                if (dup) {
+                  throw new Error(
+                    "D1_ERROR: UNIQUE constraint failed: collection_updates.collection_inscription_id",
+                  );
+                }
+                const dup2 = find(state.collection_updates, {
+                  inscription_id: inscriptionId, network,
+                });
+                if (dup2) {
+                  throw new Error(
+                    "D1_ERROR: UNIQUE constraint failed: collection_updates.inscription_id",
+                  );
+                }
+                state.collection_updates.push({
+                  inscription_id: inscriptionId,
+                  collection_inscription_id: collectionId,
+                  network, update_sequence: updateSequence,
+                  set_json: setJson, commit_txid: commitTxid,
+                  reveal_txid: revealTxid, accepted_at: acceptedAt,
+                });
+                return { success: true };
+              }
+              if (sql.includes("INSERT OR IGNORE INTO rejected_updates")) {
+                const [
+                  inscriptionId, collectionId, network,
+                  reason, rawBody, rejectedAt,
+                ] = args;
+                if (!find(state.rejected_updates, {
+                  inscription_id: inscriptionId, network,
+                })) {
+                  state.rejected_updates.push({
+                    inscription_id: inscriptionId,
+                    collection_inscription_id: collectionId,
+                    network, reason,
+                    raw_body_json: rawBody, rejected_at: rejectedAt,
+                  });
+                }
+                return { success: true };
+              }
+              return { success: true };
+            },
+          };
+        },
+      };
+    },
+  };
+
+  return { env: { DB: db }, state };
+}
+
+const COLL_ID = `${"1".repeat(64)}i0`;
+const ROOT_REVEAL_TXID = "root-reveal-txid";
+const ROOT_BODY_JSON = JSON.stringify({
+  p: "pokebells-collection", v: 1, name: "PokeBells", slug: "pokebells",
+  indexer_urls: ["https://idx1.example/"],
+  companion_urls: ["https://comp1.example/"],
+  bridge_urls: [],
+  root_app_urls: [],
+  app_manifest_ids: [`${"2".repeat(64)}i0`],
+});
+
+test("registerCollectionRoot + getCollectionRoot roundtrip", async () => {
+  const { env, state } = createCollectionEnv();
+  await registerCollectionRoot(env, {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
+  });
+  assert.equal(state.collections.length, 1);
+
+  const row = await getCollectionRoot(env, COLL_ID, "bells-testnet");
+  assert.equal(row.inscription_id, COLL_ID);
+  assert.equal(row.initial_reveal_txid, ROOT_REVEAL_TXID);
+});
+
+test("registerCollectionRoot is idempotent on repeat", async () => {
+  const { env, state } = createCollectionEnv();
+  const args = {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
+  };
+  await registerCollectionRoot(env, args);
+  await registerCollectionRoot(env, args);
+  assert.equal(state.collections.length, 1);
+});
+
+test("insertAcceptedCollectionUpdate enforces UNIQUE sequence", async () => {
+  const { env } = createCollectionEnv();
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 1,
+    setJson: "{\"app_manifest_ids_prepend\":[\"new\"]}",
+    commitTxid: "c1", revealTxid: "r1",
+  });
+  await assert.rejects(
+    () => insertAcceptedCollectionUpdate(env, {
+      inscriptionId: "u2i0", collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: 1,  // replay!
+      setJson: "{}", commitTxid: "c2", revealTxid: "r2",
+    }),
+    /UNIQUE constraint/,
+  );
+});
+
+test("insertAcceptedCollectionUpdate enforces UNIQUE inscription_id", async () => {
+  const { env } = createCollectionEnv();
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 1, setJson: "{}",
+    commitTxid: "c1", revealTxid: "r1",
+  });
+  await assert.rejects(
+    () => insertAcceptedCollectionUpdate(env, {
+      inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: 2, setJson: "{}",
+      commitTxid: "c2", revealTxid: "r2",
+    }),
+    /UNIQUE constraint/,
+  );
+});
+
+test("recordRejectedUpdate is idempotent on retry", async () => {
+  const { env, state } = createCollectionEnv();
+  const args = {
+    inscriptionId: "badi0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", reason: "schema",
+    rawBodyJson: "{}",
+  };
+  await recordRejectedUpdate(env, args);
+  await recordRejectedUpdate(env, args);
+  assert.equal(state.rejected_updates.length, 1);
+});
+
+test("currentCollectionSatpoint: no updates -> initial_reveal_txid", async () => {
+  const { env } = createCollectionEnv();
+  await registerCollectionRoot(env, {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
+  });
+  const sp = await currentCollectionSatpoint(env, COLL_ID, "bells-testnet");
+  assert.deepEqual(sp, {
+    revealTxid: ROOT_REVEAL_TXID, vout: 0, lastSequence: 0,
+  });
+});
+
+test("currentCollectionSatpoint: with N updates -> latest reveal_txid", async () => {
+  const { env } = createCollectionEnv();
+  await registerCollectionRoot(env, {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
+  });
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 1, setJson: "{}",
+    commitTxid: "c1", revealTxid: "r1",
+  });
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u2i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 2, setJson: "{}",
+    commitTxid: "c2", revealTxid: "r2",
+  });
+  const sp = await currentCollectionSatpoint(env, COLL_ID, "bells-testnet");
+  assert.deepEqual(sp, {
+    revealTxid: "r2", vout: 0, lastSequence: 2,
+  });
+});
+
+test("currentCollectionSatpoint: unknown collection -> null", async () => {
+  const { env } = createCollectionEnv();
+  const sp = await currentCollectionSatpoint(env, COLL_ID, "bells-testnet");
+  assert.equal(sp, null);
+});
+
+test("aggregatedCollectionLatest: empty root -> aggregated == body", async () => {
+  const { env } = createCollectionEnv();
+  await registerCollectionRoot(env, {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
+  });
+  const agg = await aggregatedCollectionLatest(env, COLL_ID, "bells-testnet");
+  assert.ok(agg);
+  assert.equal(agg.stats.applied_updates, 0);
+  assert.equal(agg.current_satpoint.last_sequence, 0);
+  assert.deepEqual(agg.aggregated.indexer_urls, ["https://idx1.example/"]);
+  assert.equal(agg.aggregated.app_manifest_ids.length, 1);
+});
+
+test("aggregatedCollectionLatest: updates prepend in sequence order", async () => {
+  const { env } = createCollectionEnv();
+  await registerCollectionRoot(env, {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
+  });
+  // Update 1 prepends a new manifest id.
+  const manifestA = `${"a".repeat(64)}i0`;
+  const manifestB = `${"b".repeat(64)}i0`;
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 1,
+    setJson: JSON.stringify({ app_manifest_ids_prepend: [manifestA] }),
+    commitTxid: "c1", revealTxid: "r1",
+  });
+  // Update 2 prepends another.
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u2i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 2,
+    setJson: JSON.stringify({
+      app_manifest_ids_prepend: [manifestB],
+      indexer_urls_prepend: ["https://idx2.example/"],
+    }),
+    commitTxid: "c2", revealTxid: "r2",
+  });
+  const agg = await aggregatedCollectionLatest(env, COLL_ID, "bells-testnet");
+  // Latest update wins at index 0.
+  assert.equal(agg.aggregated.app_manifest_ids[0], manifestB);
+  assert.equal(agg.aggregated.app_manifest_ids[1], manifestA);
+  assert.equal(agg.aggregated.app_manifest_ids[2], `${"2".repeat(64)}i0`);
+  assert.equal(agg.aggregated.indexer_urls[0], "https://idx2.example/");
+  assert.equal(agg.aggregated.indexer_urls[1], "https://idx1.example/");
+  assert.equal(agg.stats.applied_updates, 2);
+  assert.equal(agg.stats.prepended.app_manifest_ids, 2);
+  assert.equal(agg.stats.prepended.indexer_urls, 1);
+  assert.equal(agg.current_satpoint.reveal_txid, "r2");
+  assert.equal(agg.current_satpoint.last_sequence, 2);
+});
+
+test("aggregatedCollectionLatest: unknown collection -> null", async () => {
+  const { env } = createCollectionEnv();
+  const agg = await aggregatedCollectionLatest(env, COLL_ID, "bells-testnet");
+  assert.equal(agg, null);
+});
+
+test("aggregatedCollectionLatest: malformed body_json throws clearly", async () => {
+  const { env, state } = createCollectionEnv();
+  state.collections.push({
+    inscription_id: COLL_ID, network: "bells-testnet",
+    body_json: "not-json", initial_reveal_txid: ROOT_REVEAL_TXID,
+    registered_at: 0,
+  });
+  await assert.rejects(
+    () => aggregatedCollectionLatest(env, COLL_ID, "bells-testnet"),
+    /invalid body_json/,
+  );
 });

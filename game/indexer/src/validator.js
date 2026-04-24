@@ -825,3 +825,213 @@ export function validateCollection(parsed) {
     },
   };
 }
+
+// ============================================================================
+// op:"collection_update" body validator (Phase B)
+// ============================================================================
+//
+// Schema-stage check only. Does NOT verify authority (sat-spend-v1) or
+// sequence monotonicity — those happen separately in
+// verifyCollectionUpdateAuthority + the DB UNIQUE constraint respectively.
+// See game/ROOT-APP-DESIGN.md for the full ingestion pipeline.
+
+const COLLECTION_UPDATE_PREPEND_KEYS = Object.freeze([
+  "app_manifest_ids_prepend",
+  "root_app_urls_prepend",
+  "indexer_urls_prepend",
+  "companion_urls_prepend",
+  "bridge_urls_prepend",
+]);
+
+export function validateCollectionUpdate(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return reject("schema", "collection_update is not an object");
+  }
+  if (parsed.p !== "pokebells") {
+    return reject("schema", 'p must equal "pokebells"');
+  }
+  if (parsed.op !== "collection_update") {
+    return reject("schema", 'op must equal "collection_update"');
+  }
+  if (parsed.v !== 1) {
+    return reject("schema", "v must equal 1");
+  }
+
+  if (parsed.network !== "bells-mainnet" && parsed.network !== "bells-testnet") {
+    return reject("schema", 'network must be "bells-mainnet" or "bells-testnet"');
+  }
+
+  if (typeof parsed.collection_inscription_id !== "string"
+      || !COLLECTION_INSCRIPTION_ID_RE.test(parsed.collection_inscription_id)) {
+    return reject(
+      "schema",
+      "collection_inscription_id must be a full inscription id (64 hex + iN)",
+    );
+  }
+
+  if (!Number.isInteger(parsed.update_sequence) || parsed.update_sequence < 1) {
+    return reject("schema", "update_sequence must be a positive integer");
+  }
+
+  if (typeof parsed.issued_at !== "string" || !parsed.issued_at.trim()) {
+    return reject("schema", "issued_at must be a non-empty string");
+  }
+
+  if (!parsed.set || typeof parsed.set !== "object" || Array.isArray(parsed.set)) {
+    return reject("schema", "set must be a non-null plain object");
+  }
+  const setKeys = Object.keys(parsed.set);
+  if (setKeys.length === 0) {
+    return reject("schema", "set must contain at least one *_prepend key");
+  }
+
+  const normalizedSet = {};
+  for (const key of setKeys) {
+    if (!COLLECTION_UPDATE_PREPEND_KEYS.includes(key)) {
+      return reject(
+        "schema",
+        `set key "${key}" not in v1 allowlist (${COLLECTION_UPDATE_PREPEND_KEYS.join(", ")})`,
+      );
+    }
+    const value = parsed.set[key];
+    if (!Array.isArray(value) || value.length === 0) {
+      return reject("schema", `set.${key} must be a non-empty array`);
+    }
+    for (let i = 0; i < value.length; i += 1) {
+      const item = value[i];
+      if (typeof item !== "string") {
+        return reject("schema", `set.${key}[${i}] must be a string`);
+      }
+      if (key === "app_manifest_ids_prepend") {
+        if (!COLLECTION_INSCRIPTION_ID_RE.test(item)) {
+          return reject("schema", `set.${key}[${i}] must be an inscription id`);
+        }
+      } else {
+        if (!COLLECTION_URL_RE.test(item)) {
+          return reject("schema", `set.${key}[${i}] must be an http(s) URL`);
+        }
+      }
+    }
+    normalizedSet[key] = [...value];
+  }
+
+  return {
+    ok: true,
+    normalized: {
+      p: parsed.p,
+      op: parsed.op,
+      v: parsed.v,
+      network: parsed.network,
+      collection_inscription_id: parsed.collection_inscription_id,
+      update_sequence: parsed.update_sequence,
+      issued_at: parsed.issued_at,
+      set: normalizedSet,
+    },
+  };
+}
+
+// ============================================================================
+// sat-spend-v1 authority check for op:"collection_update" (Phase B)
+// ============================================================================
+//
+// Given an update inscription id + the satpoint the update MUST have
+// spent, fetches the update's reveal tx and the commit tx funding it,
+// and checks that the commit tx has an input at the expected satpoint.
+//
+// FAIL-CLOSED policy (mirrors verifyMintOwner):
+//   - bells-mainnet + no electrs URL configured → REJECT.
+//   - bells-testnet + no electrs URL → return { ok: true, skipped: true }
+//     so local dev without electrs still functions. The indexer log
+//     records the skip; mainnet can never hit this branch.
+//
+// The caller must provide a fetchTx override in tests to exercise the
+// verification path without hitting the network.
+
+export async function verifyCollectionUpdateAuthority({
+  updateInscriptionId,
+  expectedSatpoint,
+  env,
+  network,
+  fetchTx = null,
+}) {
+  if (!expectedSatpoint
+      || typeof expectedSatpoint.revealTxid !== "string"
+      || !Number.isInteger(expectedSatpoint.vout)) {
+    return reject("authority", "expectedSatpoint { revealTxid, vout } is required");
+  }
+
+  if (!fetchTx) {
+    const electrsBase = network === "bells-mainnet"
+      ? env?.ELECTRS_BASE_MAINNET
+      : env?.ELECTRS_BASE_TESTNET;
+    if (!electrsBase) {
+      if (network === "bells-mainnet") {
+        return reject(
+          "authority",
+          "mainnet sat-spend authority check disabled (ELECTRS_BASE_MAINNET unset); refusing to fail-open on production network",
+        );
+      }
+      return {
+        ok: true,
+        skipped: true,
+        reason: "electrs base unset (testnet dev mode)",
+      };
+    }
+    fetchTx = async (txid) => {
+      let resp;
+      try { resp = await fetch(`${electrsBase}/tx/${txid}`, { cf: { cacheTtl: 60 } }); }
+      catch (e) { throw new Error(`electrs fetch for ${txid}: ${e.message}`); }
+      if (!resp.ok) {
+        throw new Error(`electrs returned ${resp.status} for tx ${txid}`);
+      }
+      try { return await resp.json(); }
+      catch (e) { throw new Error(`electrs response not JSON for ${txid}: ${e.message}`); }
+    };
+  }
+
+  const updateRevealTxid = String(updateInscriptionId ?? "").replace(/i\d+$/i, "");
+  if (!/^[0-9a-f]{64}$/i.test(updateRevealTxid)) {
+    return reject("authority", `updateInscriptionId malformed: ${updateInscriptionId}`);
+  }
+
+  let revealTx;
+  try { revealTx = await fetchTx(updateRevealTxid); }
+  catch (e) { return reject("authority", `reveal tx fetch: ${e.message}`); }
+
+  const commitTxid = revealTx?.vin?.[0]?.txid;
+  if (typeof commitTxid !== "string" || !commitTxid) {
+    return reject(
+      "authority",
+      `reveal tx ${updateRevealTxid} vin[0].txid missing`,
+    );
+  }
+
+  let commitTx;
+  try { commitTx = await fetchTx(commitTxid); }
+  catch (e) { return reject("authority", `commit tx fetch: ${e.message}`); }
+
+  if (!Array.isArray(commitTx?.vin) || commitTx.vin.length === 0) {
+    return reject(
+      "authority",
+      `commit tx ${commitTxid} has no vin`,
+    );
+  }
+
+  const spent = commitTx.vin.some((v) =>
+    v && v.txid === expectedSatpoint.revealTxid && v.vout === expectedSatpoint.vout
+  );
+  if (!spent) {
+    return reject(
+      "authority",
+      `commit tx ${commitTxid} did not spend expected satpoint `
+        + `${expectedSatpoint.revealTxid}:${expectedSatpoint.vout} `
+        + `(inputs=${commitTx.vin.length})`,
+    );
+  }
+
+  return {
+    ok: true,
+    commit_txid: commitTxid,
+    reveal_txid: updateRevealTxid,
+  };
+}

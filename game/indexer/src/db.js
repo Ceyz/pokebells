@@ -430,6 +430,157 @@ export function isStarterRaceError(e) {
       && /idx_pokemon_starter_unique/i.test(combined);
 }
 
+// =====================================================================
+// Phase B: collection + op:"collection_update" DB helpers
+// =====================================================================
+// Authority model = sat-spend-v1 (see game/ROOT-APP-DESIGN.md). The
+// helpers below do NOT verify sat-spend authority — that is the caller's
+// responsibility via verifyCollectionUpdateAuthority. These helpers only
+// persist + read rows; authority must pass before insertAccepted* is
+// called.
+
+export async function registerCollectionRoot(env, {
+  inscriptionId, network, bodyJson, initialRevealTxid,
+}) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(`
+    INSERT OR IGNORE INTO collections (
+      inscription_id, network, body_json, initial_reveal_txid, registered_at
+    ) VALUES (?, ?, ?, ?, ?)
+  `).bind(inscriptionId, network, bodyJson, initialRevealTxid, now).run();
+}
+
+export async function getCollectionRoot(env, inscriptionId, network) {
+  const row = await env.DB.prepare(`
+    SELECT * FROM collections WHERE inscription_id = ? AND network = ?
+  `).bind(inscriptionId, network).first();
+  return row ?? null;
+}
+
+// Insert an accepted collection_update. The UNIQUE (collection, network,
+// update_sequence) constraint rejects replays and out-of-order sequences
+// at the storage layer; the caller catches the error + records via
+// recordRejectedUpdate for audit. Caller is responsible for calling
+// verifyCollectionUpdateAuthority BEFORE reaching this function.
+export async function insertAcceptedCollectionUpdate(env, {
+  inscriptionId, collectionInscriptionId, network,
+  updateSequence, setJson, commitTxid, revealTxid,
+}) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(`
+    INSERT INTO collection_updates (
+      inscription_id, collection_inscription_id, network, update_sequence,
+      set_json, commit_txid, reveal_txid, accepted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    inscriptionId, collectionInscriptionId, network, updateSequence,
+    setJson, commitTxid, revealTxid, now,
+  ).run();
+}
+
+// Audit trail. INSERT OR IGNORE so a retried POST of an already-rejected
+// inscription doesn't spam the table.
+export async function recordRejectedUpdate(env, {
+  inscriptionId, collectionInscriptionId, network, reason, rawBodyJson,
+}) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(`
+    INSERT OR IGNORE INTO rejected_updates (
+      inscription_id, collection_inscription_id, network,
+      reason, raw_body_json, rejected_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(
+    inscriptionId, collectionInscriptionId ?? null, network,
+    reason, rawBodyJson ?? null, now,
+  ).run();
+}
+
+// Returns the satpoint the NEXT collection_update's commit tx must spend,
+// derived deterministically from the accepted update chain:
+//   - no updates yet -> (collection.initial_reveal_txid, 0)
+//   - N updates      -> (latest_update.reveal_txid, 0)
+// Returns null if the collection root is not registered.
+export async function currentCollectionSatpoint(env, collectionInscriptionId, network) {
+  const latest = await env.DB.prepare(`
+    SELECT reveal_txid, update_sequence FROM collection_updates
+    WHERE collection_inscription_id = ? AND network = ?
+    ORDER BY update_sequence DESC
+    LIMIT 1
+  `).bind(collectionInscriptionId, network).first();
+  if (latest?.reveal_txid) {
+    return {
+      revealTxid: latest.reveal_txid,
+      vout: 0,
+      lastSequence: latest.update_sequence,
+    };
+  }
+  const root = await getCollectionRoot(env, collectionInscriptionId, network);
+  if (!root) return null;
+  return {
+    revealTxid: root.initial_reveal_txid,
+    vout: 0,
+    lastSequence: 0,
+  };
+}
+
+// Returns the aggregated collection view: the root body with all accepted
+// *_prepend updates applied in sequence order (newest prepended to the
+// front). The result is what /api/collection/latest returns.
+export async function aggregatedCollectionLatest(env, collectionInscriptionId, network) {
+  const root = await getCollectionRoot(env, collectionInscriptionId, network);
+  if (!root) return null;
+
+  let body;
+  try {
+    body = JSON.parse(root.body_json);
+  } catch (e) {
+    throw new Error(`collection ${collectionInscriptionId} has invalid body_json: ${e.message}`);
+  }
+
+  const rows = await env.DB.prepare(`
+    SELECT inscription_id, update_sequence, set_json, reveal_txid, accepted_at
+    FROM collection_updates
+    WHERE collection_inscription_id = ? AND network = ?
+    ORDER BY update_sequence ASC
+  `).bind(collectionInscriptionId, network).all();
+  const updates = (rows?.results ?? []).map((u) => ({
+    ...u,
+    set: JSON.parse(u.set_json),
+  }));
+
+  // Clone the root body so we never mutate the stored row's parsed copy.
+  const aggregated = JSON.parse(JSON.stringify(body));
+  const stats = { applied_updates: 0, prepended: {} };
+  for (const u of updates) {
+    for (const key of Object.keys(u.set)) {
+      const targetKey = key.endsWith("_prepend")
+        ? key.slice(0, -"_prepend".length)
+        : key;
+      if (!Array.isArray(aggregated[targetKey])) continue;
+      aggregated[targetKey] = [...u.set[key], ...aggregated[targetKey]];
+      stats.prepended[targetKey] = (stats.prepended[targetKey] ?? 0) + u.set[key].length;
+    }
+    stats.applied_updates += 1;
+  }
+
+  return {
+    collection_inscription_id: root.inscription_id,
+    network: root.network,
+    registered_at: root.registered_at,
+    aggregated,
+    stats,
+    current_satpoint: {
+      reveal_txid: updates.length > 0
+        ? updates[updates.length - 1].reveal_txid
+        : root.initial_reveal_txid,
+      vout: 0,
+      last_sequence: updates.length > 0
+        ? updates[updates.length - 1].update_sequence
+        : 0,
+    },
+  };
+}
+
 export async function pokemonByOwner(env, ownerAddress, network, limit = 50, offset = 0) {
   const rows = await env.DB.prepare(`
     SELECT * FROM pokemon

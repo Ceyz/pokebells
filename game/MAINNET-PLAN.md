@@ -77,10 +77,29 @@ requires another review round.
      Nintondo electrs filters UTXOs ≤ 1000 sats from the address
      endpoint, so Phase B tooling + indexer must track satpoints
      independently (see ROOT-APP-DESIGN.md "Phase 0 findings").
-   - **Phase B** (indexer sat-spend validator + satpoint tracking +
-     `/api/collection/latest`) and **Phase C** (boot.js discovery +
-     baked `DEFAULT_*_COLLECTION_ID`) still pending — now unblocked
-     by the Phase 0 PASS.
+   - **Phase B shipped 2026-04-24 (core logic, no worker wiring yet)**:
+     - Schema: `collections`, `collection_updates`, `rejected_updates`
+       tables in `game/indexer/schema.sql`.
+     - Builder: `buildCollectionUpdateRecord` + constants in
+       `game/capture-core.mjs` (11 tests).
+     - Validator: `validateCollectionUpdate` in indexer (12 tests).
+     - DB helpers: `registerCollectionRoot`, `getCollectionRoot`,
+       `insertAcceptedCollectionUpdate` (UNIQUE-enforced monotonic
+       sequence), `recordRejectedUpdate` (audit trail, idempotent),
+       `currentCollectionSatpoint` (derived deterministically from
+       the accepted update chain, no separate sat tracker needed),
+       `aggregatedCollectionLatest` (prepend-only aggregator)
+       (12 tests).
+     - Authority: `verifyCollectionUpdateAuthority` — sat-spend-v1
+       check via electrs tx fetch (commit tx must spend the
+       expected satpoint). Fail-closed on mainnet without electrs;
+       testnet skipped:true fallback for local dev. 10 tests.
+     - Still pending in Phase B: worker route wiring
+       (`POST /api/collections`, `POST /api/collection-updates`,
+       `GET /api/collection/latest`) — mostly plumbing on top of
+       the above helpers. Expected ~100-150 lines.
+   - **Phase C** (boot.js discovery + baked `DEFAULT_*_COLLECTION_ID`)
+     still pending.
 10. **Fork resilience.** Follow `OPEN_SOURCE.md` from scratch and
     confirm a fresh fork can deploy its own indexer in 2-3 hours.
 11. **Multi-tab decision — shipped 2026-04-24.** Exclusive

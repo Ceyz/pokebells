@@ -399,19 +399,58 @@ SHIPPED 2026-04-24.**
 - Acceptance met: the new template validates; inserted data passes
   the schema; indexer `npm test` suite grew from 23 to 35.
 
-**Phase B — op:"collection_update" with sat-spend authority.**
-- Implement the update schema + prepend-only aggregator in the
-  indexer.
-- Implement satpoint tracking for the collection root over time
-  (block-by-block scan for spends of the current UTXO).
-- Implement the commit-tx-input check via electrs.
-- Add `collection_updates` + `rejected_updates` tables and the
-  aggregated `/api/collection/latest` endpoint.
-- Shell.js NOT YET consuming it.
-- Acceptance: a `collection_update` whose commit tx spends the
-  current collection root UTXO is accepted; one whose commit tx
-  does NOT spend it is rejected; replay / out-of-sequence is
-  rejected; scalar-set key is rejected.
+**Phase B — core logic SHIPPED 2026-04-24; worker route still pending.**
+
+Shipped (196/196 tests green):
+- Schema (schema.sql): `collections` (one row per registered root),
+  `collection_updates` (append-only, UNIQUE on
+  (collection, network, update_sequence) — replays and
+  out-of-order sequences rejected at storage layer),
+  `rejected_updates` (audit trail, idempotent).
+- Builder (`capture-core.mjs` `buildCollectionUpdateRecord`):
+  canonical body with the `_prepend` allowlist, scalar keys
+  rejected at build time.
+- Validator (`indexer/src/validator.js` `validateCollectionUpdate`):
+  schema stage. Rejects wrong p/op/v, bad network, malformed
+  collection id, non-positive sequence, empty or malformed set,
+  set keys outside the allowlist, non-array or empty-array set
+  values, non-inscription-id entries in `app_manifest_ids_prepend`,
+  non-URL entries in `*_urls_prepend`.
+- DB helpers (`indexer/src/db.js`): `registerCollectionRoot`
+  (idempotent), `insertAcceptedCollectionUpdate` (UNIQUE-enforced),
+  `recordRejectedUpdate` (idempotent audit), `currentCollectionSatpoint`
+  (derives the satpoint deterministically from the accepted update
+  chain — no separate sat tracker needed because the chain itself
+  says where the sat is), `aggregatedCollectionLatest` (prepend-only
+  aggregator that returns root body + applied updates in sequence
+  order, plus stats + current satpoint).
+- Authority check (`indexer/src/validator.js`
+  `verifyCollectionUpdateAuthority`): fetches the update's reveal
+  tx + its commit tx via electrs, verifies one of the commit tx
+  inputs matches the expected satpoint. Fail-closed on mainnet
+  without `ELECTRS_BASE_MAINNET`; testnet `skipped:true` fallback
+  for local dev. Tests cover the full matrix (pass, wrong
+  satpoint, fetch failures, malformed inputs, mainnet
+  fail-closed, testnet skipped).
+
+Still pending in Phase B:
+- Worker route wiring in `indexer/src/worker.js`:
+  `POST /api/collections` (operator registers the root body),
+  `POST /api/collection-updates` (ingestion pipeline:
+  fetch inscription body from content host → validate schema →
+  load `currentCollectionSatpoint` → `verifyCollectionUpdateAuthority`
+  → `insertAcceptedCollectionUpdate` on success, `recordRejectedUpdate`
+  on any failure), `GET /api/collection/latest` (returns
+  `aggregatedCollectionLatest`).
+- D1 migration ingestion so `schema.sql` changes auto-apply on the
+  next deploy (the existing GHA hook handles this; just needs the
+  schema push).
+
+Acceptance met for the core logic: validator rejects all the shape
+errors, DB layer enforces monotonicity + idempotency, authority
+check refuses anything that doesn't spend the expected satpoint,
+mainnet fails closed when electrs is unavailable. Integration with
+live chain is the remaining worker-route work.
 
 **Phase C — boot.js collection-aware discovery.**
 - Bake `DEFAULT_*_COLLECTION_ID` alongside `DEFAULT_*_MANIFEST_ID`

@@ -365,3 +365,68 @@ CREATE TABLE IF NOT EXISTS scan_cursor (
   PRIMARY KEY (network, scheme),
   CHECK (network IN ('bells-mainnet', 'bells-testnet'))
 );
+
+-- =====================================================================
+-- Phase B: p:pokebells-collection + op:"collection_update" tracking
+-- =====================================================================
+-- Authority model is sat-spend-v1: a collection_update inscription is
+-- accepted iff its commit tx spent the UTXO currently holding the
+-- collection root sat. No signature required. See
+-- game/ROOT-APP-DESIGN.md and game/schemas/pokebells-collection.schema.md.
+
+-- Known collection root inscriptions. Phase B ingests this when the
+-- operator registers the collection via POST /api/collections. body_json
+-- is the raw JSON of the initial p:pokebells-collection inscription.
+-- initial_reveal_txid is the reveal tx of the collection root itself —
+-- the sat's location before any collection_update has been accepted.
+CREATE TABLE IF NOT EXISTS collections (
+  inscription_id       TEXT NOT NULL,
+  network              TEXT NOT NULL,
+  body_json            TEXT NOT NULL,
+  initial_reveal_txid  TEXT NOT NULL,
+  registered_at        INTEGER NOT NULL,
+  PRIMARY KEY (inscription_id, network),
+  CHECK (network IN ('bells-mainnet', 'bells-testnet'))
+);
+
+-- Append-only log of accepted op:"collection_update" inscriptions.
+-- update_sequence is strictly monotonic per (collection, network); a
+-- UNIQUE constraint rejects replays / out-of-order sequences. After
+-- each accepted update the collection root sat has moved to
+-- (reveal_txid, 0), which becomes the satpoint the NEXT update must
+-- spend.
+CREATE TABLE IF NOT EXISTS collection_updates (
+  inscription_id            TEXT NOT NULL,
+  collection_inscription_id TEXT NOT NULL,
+  network                   TEXT NOT NULL,
+  update_sequence           INTEGER NOT NULL,
+  set_json                  TEXT NOT NULL,     -- *_prepend keys only
+  commit_txid               TEXT NOT NULL,
+  reveal_txid               TEXT NOT NULL,     -- new satpoint = (reveal_txid, 0)
+  accepted_at               INTEGER NOT NULL,
+  PRIMARY KEY (inscription_id, network),
+  UNIQUE (collection_inscription_id, network, update_sequence),
+  CHECK (network IN ('bells-mainnet', 'bells-testnet')),
+  CHECK (update_sequence >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_updates_by_collection
+  ON collection_updates(collection_inscription_id, network, update_sequence);
+
+-- Audit trail for invalid updates. Never affects aggregated state.
+-- Kept separately so the /api/collection/latest endpoint is purely the
+-- accepted view while operators can still inspect why a specific
+-- inscription was rejected.
+CREATE TABLE IF NOT EXISTS rejected_updates (
+  inscription_id            TEXT NOT NULL,
+  collection_inscription_id TEXT,              -- may be null if schema broke before reference resolved
+  network                   TEXT NOT NULL,
+  reason                    TEXT NOT NULL,     -- e.g. 'schema', 'sequence_replay', 'authority_mismatch'
+  raw_body_json             TEXT,
+  rejected_at               INTEGER NOT NULL,
+  PRIMARY KEY (inscription_id, network),
+  CHECK (network IN ('bells-mainnet', 'bells-testnet'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejected_updates_by_collection
+  ON rejected_updates(collection_inscription_id, network, rejected_at);
