@@ -224,12 +224,42 @@ test("validateCollection accepts root_app_urls empty at initial mint", () => {
   assert.equal(r.ok, true);
 });
 
-test("validateCollection accepts REPLACE_ placeholder in app_manifest_ids", () => {
+test("validateCollection: template mode accepts REPLACE_ placeholder in app_manifest_ids", () => {
   // Pre-mint template bodies carry placeholders; tooling replaces them
-  // with real inscription ids before broadcasting.
+  // with real inscription ids before broadcasting. Template linting opts
+  // in with { allowPlaceholders: true }.
+  const r = validateCollection(makeValidCollection({
+    app_manifest_ids: ["REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT"],
+  }), { allowPlaceholders: true });
+  assert.equal(r.ok, true);
+});
+
+test("validateCollection: ingestion mode (default) REJECTS REPLACE_ placeholder", () => {
   const r = validateCollection(makeValidCollection({
     app_manifest_ids: ["REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT"],
   }));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /REPLACE_ placeholder.*rejected at ingestion/);
+});
+
+test("validateCollection: ingestion mode rejects empty app_manifest_ids", () => {
+  // root_app_urls can be [] at initial mint (root inscribed AFTER the
+  // collection), but app_manifest_ids must carry a real manifest id
+  // from day 0 — the collection must point to a bootable manifest
+  // when it's ingested.
+  const r = validateCollection(makeValidCollection({
+    app_manifest_ids: [],
+  }));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /app_manifest_ids must be non-empty/);
+});
+
+test("validateCollection: template mode still accepts empty app_manifest_ids (pre-mint template lint)", () => {
+  // A template being linted before any manifest is inscribed may still
+  // have an empty list; the linter only cares about shape.
+  const r = validateCollection(makeValidCollection({
+    app_manifest_ids: [],
+  }), { allowPlaceholders: true });
   assert.equal(r.ok, true);
 });
 

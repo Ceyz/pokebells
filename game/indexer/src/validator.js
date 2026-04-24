@@ -738,7 +738,12 @@ const COLLECTION_SUPPORTED_NETWORKS = Object.freeze([
   "bells-testnet",
 ]);
 
-export function validateCollection(parsed) {
+// `allowPlaceholders` defaults to FALSE (ingestion mode — strict). The
+// pre-mint template-linter / test fixtures that carry REPLACE_ tokens
+// must opt in with `{ allowPlaceholders: true }`. The worker route
+// MUST use the strict default so a half-baked root with REPLACE_ ids
+// cannot be accidentally ingested.
+export function validateCollection(parsed, { allowPlaceholders = false } = {}) {
   if (!parsed || typeof parsed !== "object") {
     return reject("schema", "collection is not an object");
   }
@@ -762,6 +767,19 @@ export function validateCollection(parsed) {
     }
   }
 
+  // Ingestion-mode additional constraint: app_manifest_ids must carry
+  // at least one id. root_app_urls may be empty at initial mint (per
+  // the mint choreography in ROOT-APP-DESIGN.md — the root HTML is
+  // inscribed AFTER the collection), but the collection root must
+  // already point to a bootable manifest on day 0.
+  if (!allowPlaceholders && parsed.app_manifest_ids.length === 0) {
+    return reject(
+      "schema",
+      "app_manifest_ids must be non-empty at ingestion "
+      + "(collection root must point to a bootable manifest)",
+    );
+  }
+
   for (const key of COLLECTION_URL_LIST_FIELDS) {
     for (let i = 0; i < parsed[key].length; i += 1) {
       const u = parsed[key][i];
@@ -778,10 +796,19 @@ export function validateCollection(parsed) {
     }
     const isInscriptionId = COLLECTION_INSCRIPTION_ID_RE.test(id);
     const isPlaceholder = id.startsWith(COLLECTION_PLACEHOLDER_PREFIX);
-    if (!isInscriptionId && !isPlaceholder) {
+    if (isPlaceholder && !allowPlaceholders) {
       return reject(
         "schema",
-        `app_manifest_ids[${i}] must be an inscription id (64 hex + iN) or an explicit REPLACE_ placeholder`,
+        `app_manifest_ids[${i}] is a REPLACE_ placeholder; rejected at ingestion `
+        + `(pass { allowPlaceholders: true } only for pre-mint template linting)`,
+      );
+    }
+    if (!isInscriptionId && !(allowPlaceholders && isPlaceholder)) {
+      return reject(
+        "schema",
+        allowPlaceholders
+          ? `app_manifest_ids[${i}] must be an inscription id or an explicit REPLACE_ placeholder`
+          : `app_manifest_ids[${i}] must be an inscription id (64 hex + iN)`,
       );
     }
   }
