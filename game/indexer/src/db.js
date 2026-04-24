@@ -358,7 +358,19 @@ export async function pokemonByCommit(env, refCaptureCommit) {
 
 export async function insertPokemon(env, mintInscriptionId, normalized, rawJson) {
   const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare(`
+
+  // Compute is_starter: the wallet's FIRST mint gets the starter flag.
+  // We count existing pokemon for this wallet on this network. Race-safe
+  // because schema.sql has a UNIQUE partial index on (signed_in_wallet)
+  // WHERE is_starter = 1 — if two concurrent inserts both try to set
+  // is_starter=1, SQLite rejects the second with a constraint failure
+  // and we retry with is_starter=0 (see retry branch below).
+  const existingCount = await env.DB.prepare(`
+    SELECT COUNT(*) AS n FROM pokemon WHERE signed_in_wallet = ? AND network = ?
+  `).bind(normalized.signed_in_wallet, normalized.network).first();
+  const isStarter = (existingCount?.n ?? 0) === 0 ? 1 : 0;
+
+  const doInsert = async (starterFlag) => env.DB.prepare(`
     INSERT INTO pokemon (
       mint_inscription_id, ref_capture_commit, network, signed_in_wallet,
       party_slot_index, species_id, species_name, level, shiny,
@@ -366,8 +378,8 @@ export async function insertPokemon(env, mintInscriptionId, normalized, rawJson)
       ev_hp, ev_atk, ev_def, ev_spe, ev_spc,
       status, held_item, friendship, pokerus, catch_rate,
       moves_json, pp_json, name, description, image, attributes_json,
-      raw_mint_json, registered_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      raw_mint_json, registered_at, is_starter
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     mintInscriptionId,
     normalized.ref_capture_commit,
@@ -385,8 +397,21 @@ export async function insertPokemon(env, mintInscriptionId, normalized, rawJson)
     normalized.catch_rate,
     normalized.moves_json, normalized.pp_json,
     normalized.name, normalized.description, normalized.image, normalized.attributes_json,
-    rawJson, now,
+    rawJson, now, starterFlag,
   ).run();
+
+  try {
+    await doInsert(isStarter);
+  } catch (e) {
+    // UNIQUE constraint on is_starter=1 partial index lost the race —
+    // another concurrent mint for this wallet already grabbed the
+    // starter slot. Retry as a non-starter row.
+    if (isStarter === 1 && /UNIQUE constraint/i.test(String(e.message))) {
+      await doInsert(0);
+      return;
+    }
+    throw e;
+  }
 }
 
 export async function pokemonByOwner(env, ownerAddress, network, limit = 50, offset = 0) {

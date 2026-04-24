@@ -258,10 +258,18 @@ CREATE TABLE IF NOT EXISTS pokemon (
   attributes_json            TEXT NOT NULL,
   raw_mint_json              TEXT NOT NULL,
   registered_at              INTEGER NOT NULL,
+  -- 1 iff this mint was the FIRST mint ever registered for
+  -- signed_in_wallet. Set server-side at INSERT time, immutable
+  -- afterwards. Prevents "starter spam": a wallet can inscribe as many
+  -- captures as they want, but only the first one carries the starter
+  -- flag — the rest are regular catches. The flag is public-read via
+  -- GET /api/pokemon/:id + GET /api/trainer/:owner.
+  is_starter                 INTEGER NOT NULL DEFAULT 0,
   CHECK (network IN ('bells-mainnet', 'bells-testnet')),
   CHECK (species_id BETWEEN 1 AND 251),
   CHECK (level BETWEEN 1 AND 100),
   CHECK (shiny IN (0, 1)),
+  CHECK (is_starter IN (0, 1)),
   CHECK (party_slot_index BETWEEN 1 AND 6),
   CHECK (iv_atk BETWEEN 0 AND 15),
   CHECK (iv_def BETWEEN 0 AND 15),
@@ -272,6 +280,22 @@ CREATE TABLE IF NOT EXISTS pokemon (
 
 CREATE INDEX IF NOT EXISTS idx_pokemon_owner
   ON pokemon(signed_in_wallet);
+
+-- Partial unique index: at most ONE is_starter=1 per wallet. D1 enforces
+-- this at INSERT so even a concurrent double-write (two tabs firing in
+-- the same millisecond) is safe — second one gets a CONSTRAINT fail
+-- and falls through to is_starter=0 in the retry path.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pokemon_starter_unique
+  ON pokemon(signed_in_wallet) WHERE is_starter = 1;
+
+-- Migration for databases deployed before v1.5.1 (is_starter column
+-- added). ALTER TABLE ADD COLUMN isn't idempotent in SQLite; the
+-- second run fails with "duplicate column name". Use
+-- tools/apply-d1-schema.mjs --skip-errors (which GHA does via
+-- package.json d1:migrate) to continue past that error. Fresh deploys
+-- skip this statement because the CREATE TABLE above already includes
+-- the column.
+ALTER TABLE pokemon ADD COLUMN is_starter INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_pokemon_species
   ON pokemon(species_id);
 CREATE INDEX IF NOT EXISTS idx_pokemon_iv_total
