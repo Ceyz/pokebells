@@ -1822,6 +1822,27 @@ async function refreshWalletView() {
   dom.wallet.lastMint.textContent = state.wallet.lastMint
     ? `${state.wallet.lastMint.species_name ?? state.wallet.lastMint.species} @ block ${state.wallet.lastMint.minted_at_block} (${formatStorageLocation(state.wallet.lastMint)})`
     : 'None';
+
+  // Indexer-registration queue size → surfaced on the Re-notify button
+  // so the user sees at a glance if any of their on-chain mints haven't
+  // been acknowledged by the indexer yet (e.g. indexer was down at
+  // mint time). Updated on every refreshWalletView pass.
+  if (dom.walletResyncIndexer) {
+    try {
+      const rows = await listPendingCaptures();
+      const queuedCount = rows.reduce((s, r) =>
+        s + (Array.isArray(r.pending_registrations) ? r.pending_registrations.length : 0), 0);
+      if (queuedCount > 0) {
+        dom.walletResyncIndexer.textContent = `Re-notify indexer (${queuedCount} queued)`;
+        dom.walletResyncIndexer.style.borderColor = 'var(--warn)';
+        dom.walletResyncIndexer.style.color = 'var(--warn)';
+      } else {
+        dom.walletResyncIndexer.textContent = 'Re-notify indexer';
+        dom.walletResyncIndexer.style.borderColor = '';
+        dom.walletResyncIndexer.style.color = '';
+      }
+    } catch { /* non-critical; IDB may still be initializing */ }
+  }
   dom.walletConnect.disabled = !walletState.available && !walletState.connected;
   dom.walletProbe.disabled = !canProbeWallet();
   dom.walletSignTest.disabled = !walletState.connected || !supportsSignMessage;
