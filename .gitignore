@@ -51,6 +51,7 @@ tools/*
 !tools/build-inscription-plan.mjs
 !tools/probe-sat-spend.mjs
 !tools/PROBE-SAT-SPEND.md
+!tools/TESTNET-LIVE-P0.md
 !tools/probe-sat-spend.log
 tools/bulk-inscribe-state.*.json
 !tools/pokebells-inscriber/
