@@ -60,7 +60,17 @@ requires another review round.
    on the button, retry succeeds or shows an explicit error.
 9. **Root app inscribed.** Play tab + proposal of Trainer / Pokedex /
    Leaderboard / Pending / Settings tabs. Hub ceases to depend on
-   `bellforge.app`.
+   `bellforge.app`. Full architecture in
+   [ROOT-APP-DESIGN.md](ROOT-APP-DESIGN.md) (v3 frozen).
+   - **Phase A shipped 2026-04-24**: `game/schemas/pokebells-collection.schema.md`
+     refreshed to Crystal / v1.5 / species 1..251 / attestation v2.1;
+     `game/collection.template.json` extended with `root_app_urls[]`,
+     `app_manifest_ids[]`, `update_authority`;
+     `validateCollection` in `game/indexer/src/validator.js` +
+     12 unit tests in `validator.test.js`.
+   - **Phase 0 (testnet probe)**, Phase B (indexer sat-spend validator
+     + `/api/collection/latest`), Phase C (boot.js discovery + baked
+     `DEFAULT_*_COLLECTION_ID`) still pending.
 10. **Fork resilience.** Follow `OPEN_SOURCE.md` from scratch and
     confirm a fresh fork can deploy its own indexer in 2-3 hours.
 11. **Multi-tab decision — shipped 2026-04-24.** Exclusive

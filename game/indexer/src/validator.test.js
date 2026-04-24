@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   validateCapture,
+  validateCollection,
   validateMintV1_5,
   validateSaveSnapshot,
   validateReveal,
@@ -170,4 +171,148 @@ test("validateReveal rejects captures with no commitment (v1.3 legacy)", async (
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /no commitment/);
+});
+
+// ============================================================================
+// p:pokebells-collection — Phase A (schema extension) validator
+// ============================================================================
+
+function makeValidCollection(overrides = {}) {
+  return {
+    p: "pokebells-collection",
+    v: 1,
+    name: "PokeBells",
+    slug: "pokebells",
+    description: "Pokemon Crystal on-chain captures — Bells ordinals.",
+    website: "https://bellforge.app/pokebells/",
+    networks: ["bells-mainnet", "bells-testnet"],
+    schema: {
+      capture_commit: "p:pokebells + op:capture_commit",
+      mint: "p:pokebells + op:mint",
+      evolve: "p:pokebells + op:evolve",
+    },
+    indexer_urls: ["https://pokebells-indexer.example.workers.dev"],
+    companion_urls: ["https://bellforge.app/pokebells/"],
+    bridge_urls: ["https://bellforge.app/pokebells/play-bridge.html"],
+    root_app_urls: [],
+    app_manifest_ids: [`${"a".repeat(64)}i0`],
+    update_authority: {
+      scheme: "sat-spend-v1",
+      comment: "Valid update must spend the collection sat.",
+    },
+    license: "MIT",
+    ...overrides,
+  };
+}
+
+test("validateCollection accepts a valid baseline (Phase A shape)", () => {
+  const r = validateCollection(makeValidCollection());
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.normalized.slug, "pokebells");
+  assert.equal(r.normalized.update_authority.scheme, "sat-spend-v1");
+  assert.equal(r.normalized.root_app_urls.length, 0);
+  assert.equal(r.normalized.app_manifest_ids.length, 1);
+});
+
+test("validateCollection accepts root_app_urls empty at initial mint", () => {
+  // Mint choreography: collection is minted before the root HTML, so
+  // root_app_urls starts empty and the first op:"collection_update"
+  // prepends the URL after the root is inscribed.
+  const r = validateCollection(makeValidCollection({ root_app_urls: [] }));
+  assert.equal(r.ok, true);
+});
+
+test("validateCollection accepts REPLACE_ placeholder in app_manifest_ids", () => {
+  // Pre-mint template bodies carry placeholders; tooling replaces them
+  // with real inscription ids before broadcasting.
+  const r = validateCollection(makeValidCollection({
+    app_manifest_ids: ["REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT"],
+  }));
+  assert.equal(r.ok, true);
+});
+
+test("validateCollection rejects non-object inputs", () => {
+  assert.equal(validateCollection(null).ok, false);
+  assert.equal(validateCollection("not an object").ok, false);
+  assert.equal(validateCollection(undefined).ok, false);
+});
+
+test("validateCollection rejects wrong p or v", () => {
+  const r1 = validateCollection(makeValidCollection({ p: "wrong" }));
+  assert.equal(r1.ok, false);
+  assert.match(r1.reason, /p must equal/);
+
+  const r2 = validateCollection(makeValidCollection({ v: 2 }));
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason, /v must equal 1/);
+});
+
+test("validateCollection rejects missing name or slug", () => {
+  const r1 = validateCollection(makeValidCollection({ name: "" }));
+  assert.equal(r1.ok, false);
+  assert.match(r1.reason, /name/);
+
+  const r2 = validateCollection(makeValidCollection({ slug: undefined }));
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason, /slug/);
+});
+
+test("validateCollection rejects non-array required list fields", () => {
+  for (const key of [
+    "indexer_urls", "companion_urls", "bridge_urls",
+    "root_app_urls", "app_manifest_ids",
+  ]) {
+    const r = validateCollection(makeValidCollection({ [key]: "not an array" }));
+    assert.equal(r.ok, false, `expected ${key} string to be rejected`);
+    assert.match(r.reason, new RegExp(key));
+  }
+});
+
+test("validateCollection rejects malformed URL entries", () => {
+  const r = validateCollection(makeValidCollection({
+    indexer_urls: ["not a url"],
+  }));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /indexer_urls\[0\]/);
+});
+
+test("validateCollection rejects malformed inscription ids", () => {
+  const r = validateCollection(makeValidCollection({
+    app_manifest_ids: ["not-a-hex-inscription-id"],
+  }));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /app_manifest_ids\[0\]/);
+});
+
+test("validateCollection rejects missing or wrong update_authority", () => {
+  const r1 = validateCollection(makeValidCollection({ update_authority: null }));
+  assert.equal(r1.ok, false);
+  assert.match(r1.reason, /update_authority/);
+
+  const r2 = validateCollection(makeValidCollection({
+    update_authority: { scheme: "signmessage-v1" },
+  }));
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason, /sat-spend-v1/);
+});
+
+test("validateCollection rejects empty or unknown networks", () => {
+  const r1 = validateCollection(makeValidCollection({ networks: [] }));
+  assert.equal(r1.ok, false);
+  assert.match(r1.reason, /networks/);
+
+  const r2 = validateCollection(makeValidCollection({
+    networks: ["btc-mainnet"],
+  }));
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason, /bells-mainnet/);
+});
+
+test("validateCollection normalized output is a deep copy, not aliases", () => {
+  const body = makeValidCollection();
+  const r = validateCollection(body);
+  assert.equal(r.ok, true);
+  // Mutating the input must not leak into the normalized view.
+  body.indexer_urls.push("https://leaked.example/");
+  assert.equal(r.normalized.indexer_urls.length, 1);
 });

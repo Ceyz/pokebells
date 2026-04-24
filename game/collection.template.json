@@ -20,5 +20,13 @@
   "bridge_urls": [
     "https://bellforge.app/pokebells/play-bridge.html"
   ],
+  "root_app_urls": [],
+  "app_manifest_ids": [
+    "REPLACE_WITH_MANIFEST_V1_INSCRIPTION_ID_BEFORE_MINT"
+  ],
+  "update_authority": {
+    "scheme": "sat-spend-v1",
+    "comment": "Valid collection_update must spend the UTXO holding this collection's inscription sat. See game/ROOT-APP-DESIGN.md for the full spec."
+  },
   "license": "MIT"
 }

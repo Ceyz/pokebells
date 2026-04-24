@@ -365,17 +365,25 @@ Acceptance: 4a–4d pass on testnet with the production tooling we
 intend to ship. If any step fails, report to user with details and
 pause the design. Runs in parallel to Phase A; blocks Phase B.
 
-**Phase A — collection schema extension + schema doc refresh.**
-- Extend `collection.template.json` with the new fields (see above).
-- **Refresh `game/schemas/pokebells-collection.schema.md`** — current
-  file is Gen 1 era (`capture_schema_version: "1.2"`, attestation
-  v1, `max_species_id: 151`). Bring to Crystal / v1.5 / species
-  1..251 / attestation v2.1 to match the current record set.
-- Update `game/indexer/src/validator.js` to accept the new
-  collection fields on ingestion.
-- No shell changes; baked defaults still win discovery.
-- Acceptance: `GET /api/collection/latest` returns the collection
-  body verbatim (no updates yet).
+**Phase A — collection schema extension + schema doc refresh.
+SHIPPED 2026-04-24.**
+- `collection.template.json` extended with `root_app_urls[]` (empty
+  at initial mint per choreography), `app_manifest_ids[]`,
+  `update_authority: { scheme: "sat-spend-v1" }`.
+- `game/schemas/pokebells-collection.schema.md` rewritten from Gen 1
+  era (`capture_schema_version: "1.2"`, attestation v1,
+  `max_species_id: 151`, `rom_sha1`, `operator_signature`,
+  `default_manifest_inscription_id`) to Crystal / v1.5 era, with
+  the new indirection fields + `sat-spend-v1` authority section.
+- `validateCollection` added to `game/indexer/src/validator.js` with
+  12 unit tests in `game/indexer/src/validator.test.js` covering
+  shape checks, URL format, inscription id format (+ REPLACE_
+  placeholder for pre-mint templates), authority scheme freeze to
+  `sat-spend-v1`, networks allowlist, and deep-copy normalization.
+- Phase A does NOT yet wire ingestion / aggregation — those land in
+  Phase B. Validator export is available for Phase B consumption.
+- Acceptance met: the new template validates; inserted data passes
+  the schema; indexer `npm test` suite grew from 23 to 35.
 
 **Phase B — op:"collection_update" with sat-spend authority.**
 - Implement the update schema + prepend-only aggregator in the

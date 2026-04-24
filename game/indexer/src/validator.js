@@ -708,3 +708,120 @@ export async function validateReveal(revealParsed, captureRow, env) {
     },
   };
 }
+
+// ============================================================================
+// p:pokebells-collection — root collection inscription validator (Phase A)
+// ============================================================================
+//
+// Validates the collection body shape. Phase B adds op:"collection_update"
+// validation + sat-spend authority check + aggregated /api/collection/latest
+// endpoint. See game/ROOT-APP-DESIGN.md and
+// game/schemas/pokebells-collection.schema.md.
+
+const COLLECTION_URL_LIST_FIELDS = Object.freeze([
+  "indexer_urls",
+  "companion_urls",
+  "bridge_urls",
+  "root_app_urls",
+]);
+
+const COLLECTION_REQUIRED_LIST_FIELDS = Object.freeze([
+  ...COLLECTION_URL_LIST_FIELDS,
+  "app_manifest_ids",
+]);
+
+const COLLECTION_URL_RE = /^https?:\/\/[^\s]+$/;
+const COLLECTION_INSCRIPTION_ID_RE = /^[0-9a-f]{64}i\d+$/i;
+const COLLECTION_PLACEHOLDER_PREFIX = "REPLACE_";
+const COLLECTION_SUPPORTED_NETWORKS = Object.freeze([
+  "bells-mainnet",
+  "bells-testnet",
+]);
+
+export function validateCollection(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return reject("schema", "collection is not an object");
+  }
+  if (parsed.p !== "pokebells-collection") {
+    return reject("schema", 'p must equal "pokebells-collection"');
+  }
+  if (parsed.v !== 1) {
+    return reject("schema", "v must equal 1");
+  }
+
+  for (const key of ["name", "slug"]) {
+    const value = parsed[key];
+    if (typeof value !== "string" || !value.trim()) {
+      return reject("schema", `${key} must be a non-empty string`);
+    }
+  }
+
+  for (const key of COLLECTION_REQUIRED_LIST_FIELDS) {
+    if (!Array.isArray(parsed[key])) {
+      return reject("schema", `${key} must be an array`);
+    }
+  }
+
+  for (const key of COLLECTION_URL_LIST_FIELDS) {
+    for (let i = 0; i < parsed[key].length; i += 1) {
+      const u = parsed[key][i];
+      if (typeof u !== "string" || !COLLECTION_URL_RE.test(u)) {
+        return reject("schema", `${key}[${i}] must be an http(s) URL string`);
+      }
+    }
+  }
+
+  for (let i = 0; i < parsed.app_manifest_ids.length; i += 1) {
+    const id = parsed.app_manifest_ids[i];
+    if (typeof id !== "string") {
+      return reject("schema", `app_manifest_ids[${i}] must be a string`);
+    }
+    const isInscriptionId = COLLECTION_INSCRIPTION_ID_RE.test(id);
+    const isPlaceholder = id.startsWith(COLLECTION_PLACEHOLDER_PREFIX);
+    if (!isInscriptionId && !isPlaceholder) {
+      return reject(
+        "schema",
+        `app_manifest_ids[${i}] must be an inscription id (64 hex + iN) or an explicit REPLACE_ placeholder`,
+      );
+    }
+  }
+
+  const auth = parsed.update_authority;
+  if (!auth || typeof auth !== "object") {
+    return reject("schema", "update_authority must be an object");
+  }
+  if (auth.scheme !== "sat-spend-v1") {
+    return reject(
+      "schema",
+      `update_authority.scheme must equal "sat-spend-v1" (got ${JSON.stringify(auth.scheme)})`,
+    );
+  }
+
+  if (!Array.isArray(parsed.networks) || parsed.networks.length === 0) {
+    return reject("schema", "networks must be a non-empty array");
+  }
+  for (let i = 0; i < parsed.networks.length; i += 1) {
+    const n = parsed.networks[i];
+    if (!COLLECTION_SUPPORTED_NETWORKS.includes(n)) {
+      return reject(
+        "schema",
+        `networks[${i}] must be one of ${COLLECTION_SUPPORTED_NETWORKS.join(", ")}`,
+      );
+    }
+  }
+
+  return {
+    ok: true,
+    normalized: {
+      slug: parsed.slug,
+      name: parsed.name,
+      networks: [...parsed.networks],
+      indexer_urls: [...parsed.indexer_urls],
+      companion_urls: [...parsed.companion_urls],
+      bridge_urls: [...parsed.bridge_urls],
+      root_app_urls: [...parsed.root_app_urls],
+      app_manifest_ids: [...parsed.app_manifest_ids],
+      update_authority: { scheme: auth.scheme },
+    },
+  };
+}
