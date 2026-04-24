@@ -344,39 +344,90 @@ test("registerCollectionRoot is idempotent on repeat", async () => {
   assert.equal(state.collections.length, 1);
 });
 
-test("insertAcceptedCollectionUpdate enforces UNIQUE sequence", async () => {
-  const { env } = createCollectionEnv();
-  await insertAcceptedCollectionUpdate(env, {
-    inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
-    network: "bells-testnet", updateSequence: 1,
-    setJson: "{\"app_manifest_ids_prepend\":[\"new\"]}",
-    commitTxid: "c1", revealTxid: "r1",
+// Registers a root in the mock env so subsequent insertAcceptedCollectionUpdate
+// calls pass the "root registered?" gate. Keeps per-test setup tight.
+async function seedRoot(env) {
+  await registerCollectionRoot(env, {
+    inscriptionId: COLL_ID, network: "bells-testnet",
+    bodyJson: ROOT_BODY_JSON, initialRevealTxid: ROOT_REVEAL_TXID,
   });
+}
+
+test("insertAcceptedCollectionUpdate rejects when collection root is not registered", async () => {
+  const { env } = createCollectionEnv();
   await assert.rejects(
     () => insertAcceptedCollectionUpdate(env, {
-      inscriptionId: "u2i0", collectionInscriptionId: COLL_ID,
-      network: "bells-testnet", updateSequence: 1,  // replay!
-      setJson: "{}", commitTxid: "c2", revealTxid: "r2",
+      inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: 1, setJson: "{}",
+      commitTxid: "c1", revealTxid: "r1",
     }),
-    /UNIQUE constraint/,
+    /not registered/,
   );
 });
 
-test("insertAcceptedCollectionUpdate enforces UNIQUE inscription_id", async () => {
+test("insertAcceptedCollectionUpdate rejects non-sequential first update", async () => {
   const { env } = createCollectionEnv();
+  await seedRoot(env);
+  // Sequence 2 when no updates accepted yet -> expected = 1.
+  await assert.rejects(
+    () => insertAcceptedCollectionUpdate(env, {
+      inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: 2, setJson: "{}",
+      commitTxid: "c1", revealTxid: "r1",
+    }),
+    /not sequential .*expected 1/,
+  );
+});
+
+test("insertAcceptedCollectionUpdate rejects replay of last accepted sequence", async () => {
+  const { env } = createCollectionEnv();
+  await seedRoot(env);
   await insertAcceptedCollectionUpdate(env, {
     inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
     network: "bells-testnet", updateSequence: 1, setJson: "{}",
     commitTxid: "c1", revealTxid: "r1",
   });
+  // Trying to re-insert sequence 1 -> expected = 2.
   await assert.rejects(
     () => insertAcceptedCollectionUpdate(env, {
-      inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
-      network: "bells-testnet", updateSequence: 2, setJson: "{}",
+      inscriptionId: "u2i0", collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: 1, setJson: "{}",
       commitTxid: "c2", revealTxid: "r2",
     }),
-    /UNIQUE constraint/,
+    /not sequential .*expected 2/,
   );
+});
+
+test("insertAcceptedCollectionUpdate rejects sequence gap", async () => {
+  const { env } = createCollectionEnv();
+  await seedRoot(env);
+  await insertAcceptedCollectionUpdate(env, {
+    inscriptionId: "u1i0", collectionInscriptionId: COLL_ID,
+    network: "bells-testnet", updateSequence: 1, setJson: "{}",
+    commitTxid: "c1", revealTxid: "r1",
+  });
+  // Gap: trying to skip to 3 after 1.
+  await assert.rejects(
+    () => insertAcceptedCollectionUpdate(env, {
+      inscriptionId: "u2i0", collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: 3, setJson: "{}",
+      commitTxid: "c2", revealTxid: "r2",
+    }),
+    /not sequential .*expected 2/,
+  );
+});
+
+test("insertAcceptedCollectionUpdate accepts a clean 1, 2, 3 chain", async () => {
+  const { env, state } = createCollectionEnv();
+  await seedRoot(env);
+  for (const seq of [1, 2, 3]) {
+    await insertAcceptedCollectionUpdate(env, {
+      inscriptionId: `u${seq}i0`, collectionInscriptionId: COLL_ID,
+      network: "bells-testnet", updateSequence: seq, setJson: "{}",
+      commitTxid: `c${seq}`, revealTxid: `r${seq}`,
+    });
+  }
+  assert.equal(state.collection_updates.length, 3);
 });
 
 test("recordRejectedUpdate is idempotent on retry", async () => {

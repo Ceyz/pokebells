@@ -1017,15 +1017,50 @@ export async function verifyCollectionUpdateAuthority({
     );
   }
 
-  const spent = commitTx.vin.some((v) =>
-    v && v.txid === expectedSatpoint.revealTxid && v.vout === expectedSatpoint.vout
-  );
-  if (!spent) {
+  // v1 STRICT POSITION CHECK: the expected satpoint must be at
+  // commitTx.vin[0]. Ordinals sat-flow is FIFO by input order — the
+  // collection sat lands in commit tx output[0] only if the inscription
+  // UTXO is input[0]. Our derived-satpoint helper
+  // (currentCollectionSatpoint) assumes the next sat is at
+  // (update_reveal_txid, 0), which only holds under this constraint.
+  // v2 can widen this to any vin position once a proper sat tracker
+  // lands.
+  const vinZero = commitTx.vin[0];
+  const matchesAtZero = vinZero
+    && vinZero.txid === expectedSatpoint.revealTxid
+    && vinZero.vout === expectedSatpoint.vout;
+  if (!matchesAtZero) {
+    // Diagnostic: was the expected satpoint ANYWHERE in vin? Helps debug
+    // an operator who built a valid-but-wrong-position commit tx.
+    const anywhere = commitTx.vin.some(
+      (v) => v && v.txid === expectedSatpoint.revealTxid && v.vout === expectedSatpoint.vout,
+    );
     return reject(
       "authority",
-      `commit tx ${commitTxid} did not spend expected satpoint `
+      `commit tx ${commitTxid} vin[0] did not match expected satpoint `
         + `${expectedSatpoint.revealTxid}:${expectedSatpoint.vout} `
-        + `(inputs=${commitTx.vin.length})`,
+        + `(anywhere_in_vin=${anywhere}, inputs=${commitTx.vin.length}). `
+        + `v1 requires the inscription UTXO at vin[0] so ordinals sat-flow `
+        + `lands the collection sat in commit output[0] + reveal output[0].`,
+    );
+  }
+
+  // Additional sanity checks that the sat actually ends up where the
+  // derived-satpoint helper expects (update_reveal_txid, 0):
+  //  - reveal tx must spend commit output 0 (the inscription commit output).
+  //  - reveal tx must have an output at index 0 (the inscription lives
+  //    there after the reveal).
+  if (revealTx.vin[0]?.vout !== 0) {
+    return reject(
+      "authority",
+      `reveal tx ${updateRevealTxid} vin[0].vout must be 0 `
+        + `(ordinals inscription convention; got ${revealTx.vin[0]?.vout})`,
+    );
+  }
+  if (!Array.isArray(revealTx.vout) || revealTx.vout.length === 0) {
+    return reject(
+      "authority",
+      `reveal tx ${updateRevealTxid} has no outputs — inscription has no destination`,
     );
   }
 

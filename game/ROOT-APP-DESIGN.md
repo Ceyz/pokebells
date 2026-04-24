@@ -438,6 +438,7 @@ Still pending in Phase B:
   `POST /api/collections` (operator registers the root body),
   `POST /api/collection-updates` (ingestion pipeline:
   fetch inscription body from content host → validate schema →
+  strictly compare `parsed.network` to the route/DB network →
   load `currentCollectionSatpoint` → `verifyCollectionUpdateAuthority`
   → `insertAcceptedCollectionUpdate` on success, `recordRejectedUpdate`
   on any failure), `GET /api/collection/latest` (returns
@@ -445,6 +446,24 @@ Still pending in Phase B:
 - D1 migration ingestion so `schema.sql` changes auto-apply on the
   next deploy (the existing GHA hook handles this; just needs the
   schema push).
+
+### Phase B deployment constraint (binding)
+
+`wrangler.toml` (`game/indexer/wrangler.toml:17-18`) already carries
+`ELECTRS_BASE_MAINNET` + `ELECTRS_BASE_TESTNET`. The
+`{ ok: true, skipped: true }` testnet fallback in
+`verifyCollectionUpdateAuthority` is there for local `wrangler dev`
+without env only; a deployed Worker that ever hits that branch is a
+deployment bug (logs will show `skipped: true`). Deployment checklist
+must verify both env vars are set before promoting a Worker revision
+to any non-local environment, testnet included.
+
+Worker `POST /api/collection-updates` must strictly compare
+`parsed.network === routeNetwork` (route derives network from the URL
+/ query), not treat it as "informational". This prevents an update
+body that self-declares `"network": "bells-mainnet"` from being
+ingested under a testnet route (which would corrupt the DB's
+per-network state).
 
 Acceptance met for the core logic: validator rejects all the shape
 errors, DB layer enforces monotonicity + idempotency, authority
@@ -486,13 +505,36 @@ Independent of signMessage. Rotation = transfer the collection
 root to a new address (single-key or multisig). Signature binding
 reserved for update-schema v2 once Bells signMessage is stable.
 
-### Signer rotation model
+### Signer rotation model — v1 constraint
 
-**Resolved: rotation = transfer the collection root inscription.**
-No "migrate from single-wallet to multisig via special update"
-complexity. The root body fixes the authority *scheme*
-(`sat-spend-v1`); the current holder can move the inscription to
-any address they choose.
+**Resolved: rotation happens via `op:"collection_update"`, not via
+a standalone transfer.** In v1 the operator **MUST NOT** move the
+collection root inscription outside of a `collection_update`
+commit tx. Rationale:
+
+- The indexer derives the expected "next satpoint" from the
+  accepted update chain
+  (`currentCollectionSatpoint` = latest `update.reveal_txid:0`).
+- An off-protocol transfer leaves the sat at a location the
+  indexer doesn't track; every subsequent `collection_update` will
+  fail the sat-spend-v1 authority check because the commit tx
+  spends from the new location, not the one the indexer expected.
+
+To migrate the collection to a new wallet or multisig, the
+operator issues a `collection_update` whose commit tx is signed
+from the current holder address AND whose reveal tx's output 0 is
+to the new address. The next update is then signed from the new
+address.
+
+Recovery if violated: the accepted-update chain freezes (no new
+update will pass authority). The operator must inscribe a new
+`p:pokebells-collection` root and migrate the user base via
+social / URL / baked-default channels. The old collection is
+abandoned but remains forkable.
+
+v2 can relax this by adding a sat tracker that follows
+off-protocol spends of the collection root sat, but v1 assumes
+the operator respects the protocol.
 
 ### Service fee boundary
 

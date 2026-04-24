@@ -443,9 +443,14 @@ const UPDATE_COMMIT_TXID = "b".repeat(64);
 const EXPECTED_SATPOINT = { revealTxid: "c".repeat(64), vout: 0 };
 
 function makeFetchTx({ reveal = {}, commit = {}, fail = {} } = {}) {
+  // Default reveal: spends commit output 0 (ordinals convention) and has
+  // one output at vout 0 (the inscription destination).
   const defaultReveal = {
     vin: [{ txid: UPDATE_COMMIT_TXID, vout: 0 }],
+    vout: [{ value: 1000 }],
   };
+  // Default commit: inscription UTXO at vin[0] (satisfies v1 strict
+  // position rule), funding change at vin[1].
   const defaultCommit = {
     vin: [
       { txid: EXPECTED_SATPOINT.revealTxid, vout: EXPECTED_SATPOINT.vout },
@@ -481,7 +486,54 @@ test("verifyCollectionUpdateAuthority rejects when commit tx does NOT spend expe
   });
   assert.equal(r.ok, false);
   assert.equal(r.stage, "authority");
-  assert.match(r.reason, /did not spend expected satpoint/);
+  assert.match(r.reason, /vin\[0\] did not match/);
+  assert.match(r.reason, /anywhere_in_vin=false/);
+});
+
+test("verifyCollectionUpdateAuthority rejects when satpoint is in vin but NOT at position 0 (v1 strict)", async () => {
+  // Default mock has satpoint at vin[0]. Swap: put satpoint at vin[1]
+  // and an unrelated outpoint at vin[0]. The old "some()" check would
+  // pass; v1 strict MUST reject.
+  const r = await verifyCollectionUpdateAuthority({
+    updateInscriptionId: UPDATE_INSCRIPTION_ID,
+    expectedSatpoint: EXPECTED_SATPOINT,
+    network: "bells-testnet",
+    fetchTx: makeFetchTx({
+      commit: {
+        vin: [
+          { txid: "d".repeat(64), vout: 1 },
+          { txid: EXPECTED_SATPOINT.revealTxid, vout: EXPECTED_SATPOINT.vout },
+        ],
+      },
+    }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /vin\[0\] did not match/);
+  assert.match(r.reason, /anywhere_in_vin=true/);
+});
+
+test("verifyCollectionUpdateAuthority rejects when reveal tx does not spend commit output 0", async () => {
+  const r = await verifyCollectionUpdateAuthority({
+    updateInscriptionId: UPDATE_INSCRIPTION_ID,
+    expectedSatpoint: EXPECTED_SATPOINT,
+    network: "bells-testnet",
+    fetchTx: makeFetchTx({
+      reveal: { vin: [{ txid: UPDATE_COMMIT_TXID, vout: 1 }] },  // vout !== 0
+    }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /vin\[0\]\.vout must be 0/);
+});
+
+test("verifyCollectionUpdateAuthority rejects when reveal tx has no outputs", async () => {
+  const r = await verifyCollectionUpdateAuthority({
+    updateInscriptionId: UPDATE_INSCRIPTION_ID,
+    expectedSatpoint: EXPECTED_SATPOINT,
+    network: "bells-testnet",
+    fetchTx: makeFetchTx({ reveal: { vin: [{ txid: UPDATE_COMMIT_TXID, vout: 0 }], vout: [] } }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /has no outputs/);
 });
 
 test("verifyCollectionUpdateAuthority: fetchTx failure fails closed", async () => {

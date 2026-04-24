@@ -14,7 +14,13 @@ requires another review round.
   behind an `app_manifest_id` indirection. A UI bug does NOT require
   reinscribing the ROM.
 - **Discovery order** (indexer, root, app manifest): URL param >
-  localStorage > `p:pokebells-collection.*_urls[]` > baked fallback.
+  `p:pokebells-collection.*_urls[]` (via indexer, then raw on
+  content host) > baked fallback. localStorage is a validated
+  cache only, never authoritative — see
+  [ROOT-APP-DESIGN.md](ROOT-APP-DESIGN.md) "Discovery" section
+  for the rationale (origin-safety P0 isn't empirically closed
+  yet, so another inscription on the same content host could in
+  principle poison localStorage).
 - **Indexer** = verifiable applicative cache. Nintondo = dumb pipe for
   raw inscription lookup. Neither is an opaque authority.
 - **Service fee** (0.001 BEL) baked in the official app PSBT, visible
@@ -200,9 +206,19 @@ Deferred:
    `navigator.locks` exclusive lease `pokebells:writer` (P0 #11
    above). Save-snapshot write guard is the remaining sub-item,
    tracked as P1 below.
-2. **`op:"collection_update"` signer.** Deployer wallet (simple, single
-   point of failure) vs multisig (robust, more complex UX). No current
-   recommendation.
+2. **`op:"collection_update"` authority — DECIDED v3: sat-spend-v1.**
+   Valid iff the commit tx of the update's reveal tx spends the UTXO
+   currently holding the collection root inscription (ordinals-native
+   custody primitive, no `signMessage` dependency). Rotation =
+   issue a `collection_update` whose reveal output 0 sends the sat
+   to a new address / multisig; off-protocol transfers are
+   explicitly banned in v1 because the indexer's derived satpoint
+   cannot follow them. See
+   [ROOT-APP-DESIGN.md](ROOT-APP-DESIGN.md) "Authority" and
+   "Signer rotation model — v1 constraint". Shipped in Phase B
+   (validator + DB monotonicity + authority check). Phase 0 probe
+   PASS on 2026-04-24 confirms the primitive is achievable with
+   the production inscriber tooling.
 3. **Service fee address location.** Baked in the official app module
    (recommended and accepted) vs resolved via
    `p:pokebells-collection`. Baked = immutable per inscription, fork

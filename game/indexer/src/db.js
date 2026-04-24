@@ -457,15 +457,38 @@ export async function getCollectionRoot(env, inscriptionId, network) {
   return row ?? null;
 }
 
-// Insert an accepted collection_update. The UNIQUE (collection, network,
-// update_sequence) constraint rejects replays and out-of-order sequences
-// at the storage layer; the caller catches the error + records via
-// recordRejectedUpdate for audit. Caller is responsible for calling
-// verifyCollectionUpdateAuthority BEFORE reaching this function.
+// Insert an accepted collection_update. Enforces strict sequential
+// update_sequence (no gaps, no out-of-order) BEFORE the INSERT. The
+// UNIQUE index on (collection, network, update_sequence) catches
+// same-sequence replays; this check additionally catches gap
+// insertions (seq 3 when last was 1) and lower-than-last inserts
+// (seq 2 when last was 5). Satpoint derivation in
+// currentCollectionSatpoint assumes a contiguous chain, so we
+// fail-closed here to keep the invariant.
+//
+// Caller is responsible for calling verifyCollectionUpdateAuthority
+// BEFORE reaching this function. The authority check uses the SAME
+// derived satpoint, which is only correct for the current
+// lastSequence + 1 anyway.
 export async function insertAcceptedCollectionUpdate(env, {
   inscriptionId, collectionInscriptionId, network,
   updateSequence, setJson, commitTxid, revealTxid,
 }) {
+  const sp = await currentCollectionSatpoint(env, collectionInscriptionId, network);
+  if (!sp) {
+    throw new Error(
+      `collection ${collectionInscriptionId} not registered on ${network}; `
+      + `register root via registerCollectionRoot first`,
+    );
+  }
+  const expectedSequence = sp.lastSequence + 1;
+  if (updateSequence !== expectedSequence) {
+    throw new Error(
+      `update_sequence ${updateSequence} not sequential `
+      + `(expected ${expectedSequence}, last accepted was ${sp.lastSequence})`,
+    );
+  }
+
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare(`
     INSERT INTO collection_updates (

@@ -163,10 +163,13 @@ Full spec in [ROOT-APP-DESIGN.md](../ROOT-APP-DESIGN.md). Short version:
   migrates by updating its canonical-collection-id list; both old and
   new are still valid inscriptions — social consensus picks one.
 - **Authority rotation** (operator's wallet change / move to
-  multisig): transfer the collection root inscription to the new
-  address / multisig. No code or inscription change needed; the sat
-  now lives at the new location and only that holder can issue the
-  next update.
+  multisig): issue a `collection_update` whose commit tx is signed
+  from the CURRENT holder and whose reveal tx output 0 sends the
+  resulting sat to the new address / multisig. The next update is
+  signed from there. **v1 does NOT support off-protocol transfers
+  of the collection root** — moving the sat via a plain tx
+  desyncs the indexer's derived satpoint (see
+  `ROOT-APP-DESIGN.md` "Signer rotation model — v1 constraint").
 
 ## Status
 
