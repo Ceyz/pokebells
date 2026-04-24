@@ -5071,8 +5071,10 @@ setTimeout(() => {
 if (dom.walletResyncIndexer) {
   dom.walletResyncIndexer.addEventListener('click', async () => {
     dom.walletResyncIndexer.disabled = true;
-    const originalText = dom.walletResyncIndexer.textContent;
+    const baseText = 'Re-notify indexer';
     dom.walletResyncIndexer.textContent = 'Re-notifying…';
+    let resultMsg = null;
+    let resultTone = 'ok';
     try {
       const rowsBefore = await listPendingCaptures();
       const queuedBefore = rowsBefore.reduce((s, r) =>
@@ -5083,17 +5085,33 @@ if (dom.walletResyncIndexer) {
         s + (Array.isArray(r.pending_registrations) ? r.pending_registrations.length : 0), 0);
       const drained = Math.max(0, queuedBefore - queuedAfter);
       if (queuedBefore === 0) {
-        log(`Re-notify: no pending registrations queued.`, 'ok');
+        resultMsg = '✓ Nothing to notify (0 queued)';
       } else if (queuedAfter === 0) {
-        log(`Re-notify: ${drained} registration(s) acknowledged by indexer.`, 'ok');
+        resultMsg = `✓ ${drained} registration(s) accepted`;
       } else {
-        log(`Re-notify: ${drained} / ${queuedBefore} succeeded, ${queuedAfter} still queued (indexer may still be down).`, 'warn');
+        resultMsg = `${drained} / ${queuedBefore} ok, ${queuedAfter} still pending`;
+        resultTone = 'warn';
       }
+      log(`Re-notify: ${resultMsg}`, resultTone);
     } catch (error) {
+      resultMsg = `✗ ${error.message.slice(0, 40)}`;
+      resultTone = 'bad';
       log(`Re-notify failed: ${error.message}`, 'bad');
     } finally {
-      dom.walletResyncIndexer.disabled = false;
-      dom.walletResyncIndexer.textContent = originalText;
+      // Show the result in the button label for 4 seconds, then revert.
+      // Dev log is hidden in inscription mode so the button label is
+      // the only visible feedback channel the player has.
+      dom.walletResyncIndexer.textContent = resultMsg ?? baseText;
+      dom.walletResyncIndexer.style.color =
+        resultTone === 'bad' ? 'var(--bad)'
+        : resultTone === 'warn' ? 'var(--warn)'
+        : 'var(--ok)';
+      setTimeout(() => {
+        dom.walletResyncIndexer.disabled = false;
+        // refreshWalletView() will re-derive the button's live label
+        // based on the current pendingCaptures queue count.
+        refreshWalletView().catch(() => {});
+      }, 4000);
     }
   });
 }
