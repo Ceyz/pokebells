@@ -30,6 +30,7 @@ const {
   RAM_ADDRS,
   SRAM_TOTAL_BYTE_LENGTH,
   assertInscribeCallSafe,
+  assertInscribeResultSafe,
   assertMultiTabWriter,
   buildCaptureCommitRecord,
   buildCaptureProvenance,
@@ -4110,6 +4111,25 @@ async function inscribePayloadOnChain({
     getUtxos,
     network: net,
   });
+
+  // P0 #6 post-sign safety. Decode the signed commit + reveal tx
+  // hexes and verify outputs match what we asked for: 1-or-2 commit
+  // outputs (P2TR + optional change), exactly 1 reveal output (dust),
+  // change script equals reveal script, total fee under the cap.
+  // Refusing to broadcast here catches a compromised inscriber that
+  // silently redirected outputs after our pre-build guard passed.
+  try {
+    assertInscribeResultSafe({
+      commitTxHex: result.fundTxHex,
+      revealTxHex: result.revealTxHex,
+      availableUtxos: utxos,
+    });
+  } catch (e) {
+    throw new Error(
+      `post-sign safety check failed, refusing to broadcast: ${e.message}`,
+    );
+  }
+
   return result;  // { fundTxHex, revealTxHex, inscriptionId }
 }
 

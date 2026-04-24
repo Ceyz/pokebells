@@ -13,6 +13,7 @@ import {
   INSCRIBE_FEE_RATE_MIN,
   INSCRIBE_MAX_BODY_BYTES,
   INSCRIBE_NETWORKS,
+  INSCRIBE_POSTSIGN_MAX_FEE_SATS,
   IVS_COMMITMENT_SCHEME,
   MINT_OP_V1_5,
   PARTY_OFFSETS,
@@ -27,7 +28,10 @@ import {
   WRAM_BANK0_BYTE_LENGTH,
   WRAM_BYTE_LENGTH,
   assertInscribeCallSafe,
+  assertInscribeResultSafe,
   assertMultiTabWriter,
+  decodeTx,
+  decodeTxOutputs,
   buildCaptureCommitRecord,
   buildCollectionUpdateRecord,
   COLLECTION_UPDATE_OP,
@@ -1480,6 +1484,316 @@ test('INSCRIBE bounds are internally consistent', () => {
   assert.ok(INSCRIBE_FEE_RATE_MIN < INSCRIBE_FEE_RATE_DEFAULT);
   assert.ok(INSCRIBE_FEE_RATE_DEFAULT < INSCRIBE_FEE_RATE_MAX);
   assert.ok(INSCRIBE_MAX_BODY_BYTES > 1024);
+});
+
+// ============================================================================
+// Post-sign tx safety (P0 #6 deferred half)
+// ============================================================================
+// decodeTx / decodeTxOutputs / assertInscribeResultSafe — pure
+// helpers that run on signed tx hex bytes. Test fixtures built via
+// `buildTestTx` instead of real chain data so the fixtures stay
+// deterministic + diff-reviewable.
+
+function varInt(n) {
+  if (n < 0xfd) return Uint8Array.of(n);
+  if (n < 0x10000) return Uint8Array.of(0xfd, n & 0xff, (n >> 8) & 0xff);
+  return Uint8Array.of(0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff);
+}
+
+function amountLE(n) {
+  const b = new Uint8Array(8);
+  let v = BigInt(n);
+  for (let i = 0; i < 8; i += 1) { b[i] = Number(v & 0xffn); v >>= 8n; }
+  return b;
+}
+
+function u32LE(n) {
+  return Uint8Array.of(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff);
+}
+
+function txidBytesLE(hexBE) {
+  // Flip endianness (on-chain serialization is LE of the human-
+  // readable / BE txid).
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) {
+    bytes[31 - i] = parseInt(hexBE.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function hexOfBytes(bs) {
+  let s = ''; for (const b of bs) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
+function buildTestTx({ inputs, outputs }) {
+  const parts = [];
+  parts.push(u32LE(2)); // version = 2
+  parts.push(varInt(inputs.length));
+  for (const inp of inputs) {
+    parts.push(txidBytesLE(inp.txid));
+    parts.push(u32LE(inp.vout));
+    parts.push(varInt(0)); // empty scriptSig
+    parts.push(Uint8Array.of(0xff, 0xff, 0xff, 0xff)); // sequence
+  }
+  parts.push(varInt(outputs.length));
+  for (const out of outputs) {
+    parts.push(amountLE(out.amount));
+    parts.push(varInt(out.script.length));
+    parts.push(out.script);
+  }
+  parts.push(u32LE(0)); // locktime
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const bytes = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { bytes.set(p, off); off += p.length; }
+  return hexOfBytes(bytes);
+}
+
+const P2TR_SCRIPT = Uint8Array.from([
+  0x51, 0x20, ...new Array(32).fill(0xaa),
+]);
+const P2PKH_WALLET = Uint8Array.from([
+  0x76, 0xa9, 0x14, ...new Array(20).fill(0xbb), 0x88, 0xac,
+]);
+const P2PKH_ATTACKER = Uint8Array.from([
+  0x76, 0xa9, 0x14, ...new Array(20).fill(0xee), 0x88, 0xac,
+]);
+
+const PREV_TXID_1 = 'aa'.repeat(32);
+const PREV_TXID_2 = 'bb'.repeat(32);
+
+test('decodeTx round-trips inputs + outputs', () => {
+  const hex = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 2 }],
+    outputs: [{ amount: 1000, script: P2TR_SCRIPT }],
+  });
+  const tx = decodeTx(hex);
+  assert.equal(tx.inputs.length, 1);
+  assert.equal(tx.inputs[0].txid, PREV_TXID_1);
+  assert.equal(tx.inputs[0].vout, 2);
+  assert.equal(tx.outputs.length, 1);
+  assert.equal(Number(tx.outputs[0].amount), 1000);
+});
+
+test('decodeTx rejects malformed hex', () => {
+  assert.throws(() => decodeTx('zzzz'), /hex/);
+  assert.throws(() => decodeTx(''), /hex/);
+  assert.throws(() => decodeTx('00'), /too short/);
+});
+
+test('decodeTxOutputs is a convenience wrapper returning the outputs array', () => {
+  const hex = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 0 }],
+    outputs: [
+      { amount: 1558, script: P2TR_SCRIPT },
+      { amount: 9000, script: P2PKH_WALLET },
+    ],
+  });
+  assert.deepEqual(decodeTxOutputs(hex), decodeTx(hex).outputs);
+});
+
+// ---- assertInscribeResultSafe ----
+
+const HAPPY_UTXOS = [
+  { txid: PREV_TXID_1, vout: 0, value: 10000 },
+  { txid: PREV_TXID_2, vout: 1, value: 50000 },
+];
+
+function makeHappyCommit() {
+  return buildTestTx({
+    inputs: [
+      { txid: PREV_TXID_1, vout: 0 },
+      { txid: PREV_TXID_2, vout: 1 },
+    ],
+    // Inputs sum = 60000. Outputs: 1558 (P2TR commitment) + 58200
+    // (change to wallet). Fee = 242.
+    outputs: [
+      { amount: 1558, script: P2TR_SCRIPT },
+      { amount: 58200, script: P2PKH_WALLET },
+    ],
+  });
+}
+
+function makeHappyReveal() {
+  return buildTestTx({
+    inputs: [
+      // Reveal spends commit output 0 — txid irrelevant to our verifier
+      // since we only look at commit inputs for fee math. Use a zero txid.
+      { txid: '00'.repeat(32), vout: 0 },
+    ],
+    // Reveal output: dust to wallet. 1000 sats, matching
+    // UTXO_MIN_VALUE convention.
+    outputs: [{ amount: 1000, script: P2PKH_WALLET }],
+  });
+}
+
+test('assertInscribeResultSafe accepts the happy case', () => {
+  const r = assertInscribeResultSafe({
+    commitTxHex: makeHappyCommit(),
+    revealTxHex: makeHappyReveal(),
+    availableUtxos: HAPPY_UTXOS,
+  });
+  assert.equal(r.hasChange, true);
+  assert.equal(r.commitOutputs, 2);
+  // Commit fee = 60000 - (1558 + 58200) = 242.
+  assert.equal(r.commitFee, 242);
+  // Reveal fee = 1558 - 1000 = 558.
+  assert.equal(r.revealFee, 558);
+  assert.equal(r.totalFee, 800);
+});
+
+test('assertInscribeResultSafe accepts a commit-without-change (single output)', () => {
+  const commit = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 0 }],
+    outputs: [{ amount: 1558, script: P2TR_SCRIPT }],
+  });
+  const r = assertInscribeResultSafe({
+    commitTxHex: commit,
+    revealTxHex: makeHappyReveal(),
+    availableUtxos: [{ txid: PREV_TXID_1, vout: 0, value: 2000 }],
+  });
+  assert.equal(r.hasChange, false);
+  assert.equal(r.commitFee, 442); // 2000 - 1558
+});
+
+test('assertInscribeResultSafe rejects 3+ commit outputs (extra attacker output)', () => {
+  const commit = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 0 }],
+    outputs: [
+      { amount: 1558, script: P2TR_SCRIPT },
+      { amount: 4000, script: P2PKH_WALLET },
+      { amount: 3000, script: P2PKH_ATTACKER }, // surprise!
+    ],
+  });
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: commit,
+      revealTxHex: makeHappyReveal(),
+      availableUtxos: [{ txid: PREV_TXID_1, vout: 0, value: 10000 }],
+    }),
+    /commit tx has 3 outputs/,
+  );
+});
+
+test('assertInscribeResultSafe rejects when commit output 0 is not P2TR', () => {
+  const commit = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 0 }],
+    outputs: [{ amount: 1558, script: P2PKH_ATTACKER }], // not P2TR!
+  });
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: commit,
+      revealTxHex: makeHappyReveal(),
+      availableUtxos: [{ txid: PREV_TXID_1, vout: 0, value: 2000 }],
+    }),
+    /commit output 0 is not a P2TR/,
+  );
+});
+
+test('assertInscribeResultSafe rejects reveal with more than 1 output', () => {
+  const reveal = buildTestTx({
+    inputs: [{ txid: '00'.repeat(32), vout: 0 }],
+    outputs: [
+      { amount: 1000, script: P2PKH_WALLET },
+      { amount: 400, script: P2PKH_ATTACKER },
+    ],
+  });
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: makeHappyCommit(),
+      revealTxHex: reveal,
+      availableUtxos: HAPPY_UTXOS,
+    }),
+    /reveal tx has 2 outputs/,
+  );
+});
+
+test('assertInscribeResultSafe rejects change-redirect (change script != reveal script)', () => {
+  const commit = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 0 }],
+    outputs: [
+      { amount: 1558, script: P2TR_SCRIPT },
+      { amount: 8000, script: P2PKH_ATTACKER }, // change to attacker
+    ],
+  });
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: commit,
+      revealTxHex: makeHappyReveal(), // reveal goes to P2PKH_WALLET
+      availableUtxos: [{ txid: PREV_TXID_1, vout: 0, value: 10000 }],
+    }),
+    /change may have been redirected/,
+  );
+});
+
+test('assertInscribeResultSafe rejects foreign input (unknown UTXO)', () => {
+  const commit = buildTestTx({
+    inputs: [
+      { txid: PREV_TXID_1, vout: 0 },
+      { txid: 'ff'.repeat(32), vout: 7 }, // not in availableUtxos!
+    ],
+    outputs: [
+      { amount: 1558, script: P2TR_SCRIPT },
+      { amount: 8000, script: P2PKH_WALLET },
+    ],
+  });
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: commit,
+      revealTxHex: makeHappyReveal(),
+      availableUtxos: [{ txid: PREV_TXID_1, vout: 0, value: 10000 }],
+    }),
+    /not among the caller-approved UTXOs/,
+  );
+});
+
+test('assertInscribeResultSafe rejects when total fee exceeds the cap', () => {
+  // Cap at 100 sats; actual fee is 800.
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: makeHappyCommit(),
+      revealTxHex: makeHappyReveal(),
+      availableUtxos: HAPPY_UTXOS,
+      maxTotalFeeSats: 100,
+    }),
+    /exceeds cap/,
+  );
+});
+
+test('assertInscribeResultSafe default fee cap is at least 500k sats', () => {
+  // Pin the constant so a future tightening is a deliberate decision,
+  // not an accidental reduction.
+  assert.ok(INSCRIBE_POSTSIGN_MAX_FEE_SATS >= 500_000);
+});
+
+test('assertInscribeResultSafe rejects commit spending more than inputs', () => {
+  const commit = buildTestTx({
+    inputs: [{ txid: PREV_TXID_1, vout: 0 }],
+    outputs: [
+      { amount: 1558, script: P2TR_SCRIPT },
+      { amount: 100_000, script: P2PKH_WALLET }, // > input 10000!
+    ],
+  });
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: commit,
+      revealTxHex: makeHappyReveal(),
+      availableUtxos: [{ txid: PREV_TXID_1, vout: 0, value: 10000 }],
+    }),
+    /spends more than the input total/,
+  );
+});
+
+test('assertInscribeResultSafe requires non-empty availableUtxos', () => {
+  assert.throws(
+    () => assertInscribeResultSafe({
+      commitTxHex: makeHappyCommit(),
+      revealTxHex: makeHappyReveal(),
+      availableUtxos: [],
+    }),
+    /availableUtxos/,
+  );
 });
 
 // ============================================================================

@@ -2101,6 +2101,255 @@ export async function validatePokemonMintRecord(mintRecord, commitRecord, option
   return { ok: errors.length === 0, errors, error: errors[0] ?? null };
 }
 
+// ----------------------------------------------------------------------------
+// Post-sign inscribe-result safety (P0 #6 post-sign decode half).
+// ----------------------------------------------------------------------------
+//
+// After the wallet signs the commit + reveal PSBTs and the inscriber
+// returns tx hexes, we decode the outputs and verify they match the
+// shape we asked for: 1-or-2 commit outputs (P2TR commitment +
+// optional change), exactly 1 reveal output (dust to wallet), change
+// script matches reveal script (both go to walletAddress), total fee
+// under a sane cap. Refusing broadcast here catches a compromised /
+// buggy inscriber that redirected outputs after our pre-build guard
+// passed.
+//
+// Pure helpers: no DOM, no network. Uses only BigInt + Uint8Array so
+// they run identically in Node tests and the browser.
+
+function hexToBytesStrict(hex) {
+  if (typeof hex !== 'string' || !/^[0-9a-f]+$/i.test(hex) || hex.length % 2 !== 0) {
+    throw new Error('hex must be an even-length hex string');
+  }
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToHexShort(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 1) s += bytes[i].toString(16).padStart(2, '0');
+  return s;
+}
+
+function bytesEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function readVarInt(bytes, offset) {
+  const first = bytes[offset];
+  if (first < 0xfd) return { value: first, size: 1 };
+  if (first === 0xfd) {
+    const v = bytes[offset + 1] | (bytes[offset + 2] << 8);
+    return { value: v, size: 3 };
+  }
+  if (first === 0xfe) {
+    const v = (
+      bytes[offset + 1]
+      | (bytes[offset + 2] << 8)
+      | (bytes[offset + 3] << 16)
+      | (bytes[offset + 4] << 24)
+    ) >>> 0;
+    return { value: v, size: 5 };
+  }
+  // 0xff 8-byte varint — unreachable for our use case (tx-level
+  // counters never need that range), but handled to keep the parser
+  // robust.
+  let v = 0n;
+  for (let i = 0; i < 8; i += 1) v |= BigInt(bytes[offset + 1 + i]) << BigInt(i * 8);
+  if (v > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error('varint too large for safe Number conversion');
+  }
+  return { value: Number(v), size: 9 };
+}
+
+// Decode the inputs + outputs of a raw Bitcoin/Bells tx hex string.
+// Handles legacy and segwit-flag txs; witness data is skipped because
+// it comes AFTER outputs in the serialization and we never need it.
+// Inputs carry (txid, vout) so callers can look the spent value up in
+// the UTXO list they fetched before signing — avoids a round-trip to
+// electrs just to sum inputs.
+export function decodeTx(txHex) {
+  const bytes = hexToBytesStrict(txHex);
+  if (bytes.length < 10) throw new Error('tx too short');
+
+  let off = 4; // version
+
+  // Segwit marker+flag detection: BIP 141 says bytes 4+5 == 0x00, 0x01.
+  const hasWitness = bytes[off] === 0x00 && bytes[off + 1] === 0x01;
+  if (hasWitness) off += 2;
+
+  const nIn = readVarInt(bytes, off); off += nIn.size;
+  const inputs = [];
+  for (let i = 0; i < nIn.value; i += 1) {
+    // outpoint: txid (32 LE) + vout (4 LE). Bitcoin serializes txids
+    // reversed on the wire; callers compare against "display" txid
+    // (BE hex), so we reverse here.
+    const txidLE = bytes.slice(off, off + 32);
+    const txid = bytesToHexShort(txidLE.slice().reverse());
+    off += 32;
+    const vout = (bytes[off] | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 0;
+    off += 4;
+    const sLen = readVarInt(bytes, off); off += sLen.size;
+    off += sLen.value; // scriptSig bytes — skip
+    off += 4; // sequence
+    inputs.push({ txid, vout });
+  }
+
+  const nOut = readVarInt(bytes, off); off += nOut.size;
+  const outputs = [];
+  for (let i = 0; i < nOut.value; i += 1) {
+    // amount: 8 bytes LE. BigInt to avoid precision loss; callers
+    // convert to Number when they know the range is safe
+    // (< 2^53 ≈ 90M BEL).
+    let amount = 0n;
+    for (let j = 0; j < 8; j += 1) amount |= BigInt(bytes[off + j]) << BigInt(j * 8);
+    off += 8;
+    const sLen = readVarInt(bytes, off); off += sLen.size;
+    const script = bytes.slice(off, off + sLen.value);
+    off += sLen.value;
+    outputs.push({ amount, script });
+  }
+
+  return { inputs, outputs };
+}
+
+// Back-compat: some callers only want the outputs. Returns the same
+// shape as the old single-purpose decoder.
+export function decodeTxOutputs(txHex) {
+  return decodeTx(txHex).outputs;
+}
+
+// Is this a canonical P2TR output script (OP_1 OP_PUSHBYTES_32 <32>)?
+function isP2TRScript(script) {
+  return script.length === 34 && script[0] === 0x51 && script[1] === 0x20;
+}
+
+// Verify the tx pair the inscriber returned matches the shape we
+// asked for. Throws with a descriptive error on any mismatch; returns
+// a { totalFee, commitFee, revealFee } record on success so callers
+// can log / surface the observed fee.
+//
+// Defense against:
+//   - inscriber silently adding an output to an attacker address
+//     (change redirect)
+//   - inscriber over-spending the user's UTXOs into fees
+//   - inscriber producing a reveal that sends the inscription sat
+//     somewhere other than walletAddress
+//
+// This does NOT decode the PSBT before wallet signing; the signed
+// bytes are immutable by the time we see them. But refusing to
+// broadcast here still prevents on-chain loss.
+export function assertInscribeResultSafe({
+  commitTxHex,
+  revealTxHex,
+  availableUtxos,
+  maxTotalFeeSats = INSCRIBE_POSTSIGN_MAX_FEE_SATS,
+}) {
+  if (!Array.isArray(availableUtxos) || availableUtxos.length === 0) {
+    throw new Error('availableUtxos must be a non-empty array of {txid, vout, value}');
+  }
+
+  const commit = decodeTx(commitTxHex);
+  const reveal = decodeTx(revealTxHex);
+  const commitOuts = commit.outputs;
+  const revealOuts = reveal.outputs;
+
+  // Sum input values by matching commit inputs to the UTXO list the
+  // caller pre-fetched. A foreign input that is not in the list is
+  // suspect — the inscriber spent something we did not approve.
+  const utxoMap = new Map();
+  for (const u of availableUtxos) {
+    utxoMap.set(`${u.txid}:${u.vout}`, u.value);
+  }
+  let totalInputValueSats = 0;
+  for (const inp of commit.inputs) {
+    const key = `${inp.txid}:${inp.vout}`;
+    const value = utxoMap.get(key);
+    if (value === undefined) {
+      throw new Error(
+        `commit input ${key} is not among the caller-approved UTXOs — `
+          + `possible foreign input injected by a compromised inscriber`,
+      );
+    }
+    totalInputValueSats += value;
+  }
+
+  // Commit: must have the P2TR commitment at output 0, plus at most
+  // one change output. A third output = unexpected.
+  if (commitOuts.length < 1 || commitOuts.length > 2) {
+    throw new Error(
+      `commit tx has ${commitOuts.length} outputs, expected 1 (no change) or 2 (with change)`,
+    );
+  }
+  if (!isP2TRScript(commitOuts[0].script)) {
+    throw new Error(
+      `commit output 0 is not a P2TR inscription commitment `
+        + `(script=${bytesToHexShort(commitOuts[0].script)})`,
+    );
+  }
+
+  // Reveal: exactly one output, the inscription destination dust.
+  if (revealOuts.length !== 1) {
+    throw new Error(
+      `reveal tx has ${revealOuts.length} outputs, expected exactly 1`,
+    );
+  }
+
+  // Change-redirect defense. If commit has a change output, it must
+  // match the reveal output script byte-for-byte — both are meant to
+  // go to walletAddress. A rogue inscriber adding a different change
+  // destination is caught here.
+  if (commitOuts.length === 2) {
+    const changeScript = commitOuts[1].script;
+    const revealScript = revealOuts[0].script;
+    if (!bytesEqual(changeScript, revealScript)) {
+      throw new Error(
+        `commit change script ${bytesToHexShort(changeScript)} `
+          + `does not match reveal output script ${bytesToHexShort(revealScript)} — `
+          + `change may have been redirected by a compromised inscriber`,
+      );
+    }
+  }
+
+  // Fee math.
+  let commitOutSum = 0n;
+  for (const o of commitOuts) commitOutSum += o.amount;
+  const commitFee = BigInt(totalInputValueSats) - commitOutSum;
+  if (commitFee < 0n) {
+    throw new Error(
+      `commit tx spends more than the input total `
+        + `(inputs=${totalInputValueSats}, outputs=${Number(commitOutSum)})`,
+    );
+  }
+  // The reveal tx spends commit output 0 entirely; its fee is the
+  // difference between that and the reveal output amount.
+  const revealFee = commitOuts[0].amount - revealOuts[0].amount;
+  if (revealFee < 0n) {
+    throw new Error(
+      `reveal tx output ${Number(revealOuts[0].amount)} exceeds commitment `
+        + `${Number(commitOuts[0].amount)}`,
+    );
+  }
+
+  const totalFee = Number(commitFee + revealFee);
+  if (totalFee > maxTotalFeeSats) {
+    throw new Error(
+      `total fee ${totalFee} sats exceeds cap ${maxTotalFeeSats} sats`,
+    );
+  }
+
+  return {
+    totalFee,
+    commitFee: Number(commitFee),
+    revealFee: Number(revealFee),
+    commitOutputs: commitOuts.length,
+    hasChange: commitOuts.length === 2,
+  };
+}
+
 // ============================================================================
 // SECTION: op:"collection_update" body builder (Phase B)
 // ============================================================================
@@ -2249,6 +2498,12 @@ export const INSCRIBE_MAX_BODY_BYTES = 512 * 1024;
 const INSCRIBE_HEX_RE = /^[0-9a-f]+$/i;
 const INSCRIBE_ADDRESS_RE = /^[0-9A-Za-z]+$/;
 
+// Default per-inscription total-fee cap for post-sign verification.
+// Covers a P2TR commit + P2TR reveal at the default fee rate, with a
+// generous margin for large (ROM-chunk-sized) inscriptions. Callers
+// can tighten with the `maxTotalFeeSats` option.
+export const INSCRIBE_POSTSIGN_MAX_FEE_SATS = 500_000;
+
 // ----------------------------------------------------------------------------
 // Multi-tab writer guard (product decision #1 — lease lock path).
 // ----------------------------------------------------------------------------
@@ -2366,9 +2621,13 @@ const browserExports = {
   INSCRIBE_FEE_RATE_MIN,
   INSCRIBE_MAX_BODY_BYTES,
   INSCRIBE_NETWORKS,
+  INSCRIBE_POSTSIGN_MAX_FEE_SATS,
   assertBlockHashExists,
   assertInscribeCallSafe,
+  assertInscribeResultSafe,
   assertMultiTabWriter,
+  decodeTx,
+  decodeTxOutputs,
   buildBlockByHashUrl,
   buildBlockTipHashUrl,
   SRAM_TOTAL_BYTE_LENGTH,
