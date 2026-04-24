@@ -16,13 +16,18 @@ You need:
    injection behaviour.
 
 2. **Two test inscription URLs** on `bells-testnet-content.nintondo.io/content/`:
-   - **Primary** (an HTML inscription that runs JS): either
-     - `https://bells-testnet-content.nintondo.io/content/0ea64bbd7b8589bb68b49cfc7dd9252ba20a684490131145b48d3c8a7d6c221di0`
-       (mini-test root from 2026-04-22 — small, loads boot.js)
-     - OR the actual PokeBells testnet root if you have it bookmarked
-       from the 2026-04-24 session (it loads the full shell.js game).
+   - **Primary — the actual PokeBells testnet root** (full game, loads
+     shell.js + ROM emulator):
+     `https://bells-testnet-content.nintondo.io/content/e1c15e0bd5b4be8a76cb03c35ebdb96388ea2528242f2cb57db6ce0e454f4ea2i0`
+     (HTML title: "PokeBells Phase 1"; baked manifest id
+     `e0217a8272823869e33d591fdb248b259d73c2fbd9ddfa605487802d01179a33i0`).
+     Fallback if the above ever 404s: the 2026-04-22 mini-test root
+     `0ea64bbd7b8589bb68b49cfc7dd9252ba20a684490131145b48d3c8a7d6c221di0`
+     (simpler bootloader, no game — still proves wallet injection +
+     content-host mechanics).
    - **Secondary** (any OTHER testnet inscription on the same host,
-     to compare): use the probe collection from last session:
+     to compare): use the probe collection from the Phase B+C live
+     round-trip session:
      `https://bells-testnet-content.nintondo.io/content/1ecc86cd6983d4c8eab44d9f0b208bcba10852a37d17b6839d2d497819f5118di0`
 
 3. **Browser dev tools** (F12). Console + Application tab will cover
