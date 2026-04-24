@@ -841,6 +841,47 @@ export default {
           attributes: JSON.parse(row.attributes_json ?? "[]"),
         });
       }
+
+      // Debug endpoint: returns counts + recent ingestion log entries
+      // + pending queue items. Read-only, no auth. Useful when a mint
+      // doesn't show up as expected — answers "did the POST reach us,
+      // did the validator accept, is the queue retrying?"
+      if (url.pathname === "/api/debug") {
+        const counts = await env.DB.prepare(`
+          SELECT
+            (SELECT COUNT(*) FROM captures) AS captures,
+            (SELECT COUNT(*) FROM commits)  AS commits,
+            (SELECT COUNT(*) FROM pokemon)  AS pokemon,
+            (SELECT COUNT(*) FROM reveals)  AS reveals,
+            (SELECT COUNT(*) FROM ingestion_queue) AS queue_size,
+            (SELECT COUNT(*) FROM ingestion_log)   AS log_size
+        `).first();
+        const recentLog = await env.DB.prepare(`
+          SELECT inscription_id, kind, network, outcome, reason, logged_at
+          FROM ingestion_log ORDER BY logged_at DESC LIMIT 30
+        `).all();
+        const queue = await env.DB.prepare(`
+          SELECT inscription_id, kind, network, attempts, retry_after, last_error
+          FROM ingestion_queue ORDER BY retry_after ASC LIMIT 20
+        `).all();
+        const recentCommits = await env.DB.prepare(`
+          SELECT inscription_id, signed_in_wallet, network, registered_at
+          FROM commits ORDER BY registered_at DESC LIMIT 10
+        `).all();
+        const recentPokemon = await env.DB.prepare(`
+          SELECT mint_inscription_id, ref_capture_commit, signed_in_wallet,
+                 species_name, level, is_starter, registered_at
+          FROM pokemon ORDER BY registered_at DESC LIMIT 10
+        `).all();
+        return json({
+          ok: true,
+          counts,
+          recent_log: recentLog?.results ?? [],
+          queue: queue?.results ?? [],
+          recent_commits: recentCommits?.results ?? [],
+          recent_pokemon: recentPokemon?.results ?? [],
+        });
+      }
     }
 
     return json({ ok: false, error: "not_found", path: url.pathname }, { status: 404 });
@@ -951,27 +992,58 @@ async function processQueueEntry(env, entry) {
       }
       await insertCapture(env, id, n.signed_in_wallet, n, result.raw);
     } else if (result.kind === "mint") {
-      // v1.5 mint: owner-verify + commit backref + row insert.
-      const n = result.normalized;
-      const commitRow = await commitById(env, n.capture_commit_inscription_id);
+      // v1.5 mint: match the direct POST path for queued/manual mints.
+      const mintParsed = result.parsed;
+      const refCommitId = typeof mintParsed?.ref_capture_commit === "string"
+        ? mintParsed.ref_capture_commit.trim()
+        : "";
+      if (!INSCRIPTION_ID_RE.test(refCommitId)) {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          "bad_ref_capture_commit", null);
+        return "dropped";
+      }
+      const commitRow = await commitById(env, refCommitId);
       if (!commitRow) {
         // Commit hasn't landed yet — keep waiting.
         await bumpIngestionRetry(env, id, kind,
           nextQueueRetrySeconds(attempts + 1), "commit_not_yet_indexed");
         return "requeued";
       }
-      const ownerCheck = await verifyMintOwner(id, network, env);
-      if (!ownerCheck.ok && network === "bells-mainnet") {
+      if (commitRow.network !== network) {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          "network_mismatch_with_commit", null);
+        return "dropped";
+      }
+      const existingPokemon = await pokemonByCommit(env, refCommitId);
+      if (existingPokemon) {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          `commit_already_minted_by_${existingPokemon.mint_inscription_id}`, null);
+        return "dropped";
+      }
+      const check = await validateMintV1_5(mintParsed, commitRow, env);
+      if (!check.ok) {
+        await dequeueIngestion(env, id, kind);
+        await logIngestion(env, id, kind, network, "invalid_via_queue",
+          `${check.stage}: ${check.reason}`, null);
+        return "dropped";
+      }
+      const ownerCheck = await verifyMintOwner(id, mintParsed.signed_in_wallet, env, network);
+      if (!ownerCheck.ok) {
         await dequeueIngestion(env, id, kind);
         await logIngestion(env, id, kind, network, "invalid_via_queue",
           `owner_mismatch: ${ownerCheck.reason}`, null);
         return "dropped";
       }
-      await insertPokemon(env, id, n.signed_in_wallet, n, result.raw);
+      const n = check.normalized;
+      n.mint_inscription_id = id;
+      await insertPokemon(env, id, n, result.raw);
     } else if (result.kind === "reveal") {
       // Reveal: apply to existing capture row.
-      await insertReveal(env, id, result.normalized, result.raw);
-      await applyRevealToCapture(env, result.normalized.capture_inscription_id, id, result.normalized);
+      await insertReveal(env, id, network, result.normalized, result.raw);
+      await applyRevealToCapture(env, id, result.normalized);
     }
     await dequeueIngestion(env, id, kind);
     await logIngestion(env, id, kind, network, "ok_via_queue", null, null);
