@@ -330,40 +330,54 @@ the indexer hasn't fully verified yet.
 
 ## Migration phases
 
-**Phase 0 — sat-spend feasibility probe (testnet, pre-implementation).**
+**Phase 0 — sat-spend feasibility probe. SHIPPED + PASS 2026-04-24.**
 
-Before investing in the indexer's satpoint tracking work, verify
-that `sat-spend-v1` is actually achievable with the Bells
-inscription pipeline (Nintondo Inscriber UI + the bells-inscriber
-client-side library we already ship). The concern: some
-inscription tools strip or reorder commit-tx inputs, which would
-prevent an operator from deliberately spending a specific UTXO
-(the one holding the collection root). If the probe fails, the
-authority scheme is redesigned before any Phase B code lands.
+`tools/probe-sat-spend.mjs` ran end-to-end on Bells testnet, producing
+two on-chain fixture inscriptions:
 
-Steps on testnet:
+- collection-probe: `1d7056ea2dab7a44c40a5921ccf27e629c91907c61f5041cf917a8ec76ddc73di0`
+  (testnet block 665484)
+- update-probe: `036d7e5c6bb1918426a23956a55e2e5842d7cd45178e7329dc62e67d245113a2i0`
+  (testnet block 665486)
 
-1. Inscribe a dummy `p:pokebells-collection-probe` body. Record
-   its satpoint via electrs.
-2. Using the production bells-inscriber path, build and broadcast
-   an `op:"collection_update"` probe inscription whose commit tx
-   intentionally spends the UTXO holding the dummy collection.
-3. Verify after confirmation:
-   - (a) The commit tx was broadcast as-built — no input
-     substitution by the inscriber.
-   - (b) The dummy collection satpoint moved to an output of the
-     commit tx (operator regains custody there).
-   - (c) The reveal tx confirmed, the update inscription is live.
-   - (d) The dummy collection sat is trackable at its new location
-     via electrs / ord tooling (so Phase B indexer tracking is
-     implementable on the same primitives).
-4. Also verify the negative case: an update whose commit tx does
-   NOT spend the collection sat passes through the inscriber
-   normally (so we can confirm the indexer must reject it later).
+Observed commit_2 inputs: `1d7056ea:0 (1000 sats — the inscription
+UTXO) + f051798b:1 (93,157,382 sats — funding change)`. The update's
+commit transaction deliberately spent the collection-probe's UTXO, and
+both inscription bodies remain readable at the content host after the
+sat-move. sat-spend-v1 is empirically feasible with the production
+bells-inscriber tooling.
 
-Acceptance: 4a–4d pass on testnet with the production tooling we
-intend to ship. If any step fails, report to user with details and
-pause the design. Runs in parallel to Phase A; blocks Phase B.
+### Phase 0 findings (binding on Phase B)
+
+- **Nintondo electrs dust filter.** `/address/<addr>/utxo` returns
+  outputs only above a dust threshold (empirically ≥ 1001 sats on
+  testnet 2026-04-24). The inscription UTXO (1000 sats = Bells
+  `UTXO_MIN_VALUE`) is **invisible** via this endpoint even though
+  it is unspent on chain. Tooling that wants to spend a specific
+  inscription UTXO cannot rely on the address UTXO endpoint — it
+  must track the target satpoint independently (via reveal-tx
+  output inspection, or via block-by-block spend scan).
+- **Consequence for Phase B operator tooling.** The `collection_update`
+  builder must construct the inscription UTXO manually from the most
+  recent satpoint (reveal tx of the last accepted update, or the
+  original collection root reveal if none yet). It cannot rely on
+  electrs address UTXO fetch.
+- **Consequence for Phase B indexer.** The indexer validator tracks
+  the collection root satpoint via its own chain scan; it does NOT
+  consult the address UTXO endpoint. (Already implied by the design,
+  now confirmed by the tooling gap.)
+- **`UTXO_MIN_VALUE` is 1000 sats** in Bells (see
+  `tools/pokebells-inscriber/src/consts.mjs`), not 546 as in
+  Bitcoin ordinals. Tests + validators should reference this
+  constant by name, not hard-code a value.
+
+### Probe artifacts
+
+Persisted in git as Phase B acceptance fixtures:
+- `tools/probe-sat-spend.mjs` — the standalone probe script.
+- `tools/PROBE-SAT-SPEND.md` — the operator procedure.
+- `tools/probe-sat-spend.log` — the PASS run log (kept in repo for
+  reproducibility; regenerated on future probes).
 
 **Phase A — collection schema extension + schema doc refresh.
 SHIPPED 2026-04-24.**

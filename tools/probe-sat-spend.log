@@ -1,0 +1,45 @@
+[probe] address: EKpFkdEunUFfoPMFp2X5YzML7S6w5uczgP
+[probe] network: bells-testnet
+[probe] electrs: https://bells-testnet-api.nintondo.io
+[probe] content: https://bells-testnet-content.nintondo.io/content/
+[probe] fee rate: 3 sat/vB
+
+[step 1] fetching UTXOs for initial collection-probe inscription
+         2 UTXO(s), 3093159642 sats total
+[step 1] built commit_1=f051798ba6bbce55… reveal_1=1d7056ea2dab7a44…
+         commit_1 inputs: 1 UTXO(s)
+[step 1] broadcasting commit_1
+[step 1] broadcasting reveal_1
+[step 1] inscription id: 1d7056ea2dab7a44c40a5921ccf27e629c91907c61f5041cf917a8ec76ddc73di0
+
+[step 2] fetching address UTXOs after step 1
+         2 UTXO(s) visible via electrs, 3093157382 sats
+         injecting inscription UTXO from reveal_1: 1d7056ea2dab7a44…:0 = 1000 sats
+         combined pool: 3 UTXO(s), 3093158382 sats, smallest=1000
+[step 2] built commit_2=cae23541b44a171e… reveal_2=036d7e5c6bb19184…
+         commit_2 inputs: 1d7056ea:0(1000), f051798b:1(93157382)
+[step 2] commit_2 spends inscription UTXO? YES
+[step 2] broadcasting commit_2
+[step 2] broadcasting reveal_2
+[step 2] inscription id: 036d7e5c6bb1918426a23956a55e2e5842d7cd45178e7329dc62e67d245113a2i0
+
+[step 3] verifying both inscription bodies are still readable at the content host
+         https://bells-testnet-content.nintondo.io/content/1d7056ea2dab7a44c40a5921ccf27e629c91907c61f5041cf917a8ec76ddc73di0 → HTTP 200
+         https://bells-testnet-content.nintondo.io/content/036d7e5c6bb1918426a23956a55e2e5842d7cd45178e7329dc62e67d245113a2i0 → HTTP 200
+
+======================================================================
+PROBE RESULT
+======================================================================
+Greedy-smallest-first picked the inscription UTXO as commit_2 input? YES ✓
+Collection-probe still readable post-spend?                           YES ✓
+Update-probe readable (sanity check)?                                 YES ✓
+
+Overall:                                                              PASS ✓
+
+Next steps:
+  - sat-spend-v1 is feasible with the default inscriber. Phase B can
+    implement the op:"collection_update" validator assuming the same
+    primitive works for the real collection root inscription.
+  - Share collection-probe id + update-probe id with Claude for Phase B
+    acceptance criteria fixtures.
+======================================================================

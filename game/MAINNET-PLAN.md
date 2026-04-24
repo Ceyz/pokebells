@@ -68,9 +68,19 @@ requires another review round.
      `app_manifest_ids[]`, `update_authority`;
      `validateCollection` in `game/indexer/src/validator.js` +
      12 unit tests in `validator.test.js`.
-   - **Phase 0 (testnet probe)**, Phase B (indexer sat-spend validator
-     + `/api/collection/latest`), Phase C (boot.js discovery + baked
-     `DEFAULT_*_COLLECTION_ID`) still pending.
+   - **Phase 0 PASS 2026-04-24**: sat-spend-v1 feasibility confirmed
+     end-to-end on Bells testnet via `tools/probe-sat-spend.mjs`.
+     Commit_2 deliberately spent the inscription UTXO of commit_1;
+     both bodies remain readable post-sat-move. Fixture ids:
+     `1d7056ea…ddc73di0` (collection-probe) +
+     `036d7e5c…45113a2i0` (update-probe). Critical finding:
+     Nintondo electrs filters UTXOs ≤ 1000 sats from the address
+     endpoint, so Phase B tooling + indexer must track satpoints
+     independently (see ROOT-APP-DESIGN.md "Phase 0 findings").
+   - **Phase B** (indexer sat-spend validator + satpoint tracking +
+     `/api/collection/latest`) and **Phase C** (boot.js discovery +
+     baked `DEFAULT_*_COLLECTION_ID`) still pending — now unblocked
+     by the Phase 0 PASS.
 10. **Fork resilience.** Follow `OPEN_SOURCE.md` from scratch and
     confirm a fresh fork can deploy its own indexer in 2-3 hours.
 11. **Multi-tab decision — shipped 2026-04-24.** Exclusive

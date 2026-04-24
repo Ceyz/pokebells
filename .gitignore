@@ -47,6 +47,7 @@ tools/*
 !tools/build-inscription-plan.mjs
 !tools/probe-sat-spend.mjs
 !tools/PROBE-SAT-SPEND.md
+!tools/probe-sat-spend.log
 tools/bulk-inscribe-state.*.json
 !tools/pokebells-inscriber/
 tools/pokebells-inscriber/node_modules/
@@ -120,6 +121,8 @@ node_modules/
 dist/
 build/
 *.log
+# Phase 0 probe log — kept in repo as evidence of sat-spend-v1 PASS.
+!tools/probe-sat-spend.log
 .DS_Store
 Thumbs.db
 desktop.ini

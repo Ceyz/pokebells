@@ -55,23 +55,13 @@ const DEFAULT_CONTENT = {
   "bells-mainnet": "https://bells-mainnet-content.nintondo.io/content/",
   "bells-testnet": "https://bells-testnet-content.nintondo.io/content/",
 };
+// Source of truth for network byte values: belcoinjs-lib's networks module
+// (not the Bitcoin mainnet/testnet constants — Bells has its own WIF /
+// pubKeyHash / scriptHash bytes: mainnet wif=0x99 pubKeyHash=25,
+// testnet wif=0x9e pubKeyHash=33).
 const BELLS_NETWORKS = {
-  "bells-mainnet": {
-    messagePrefix: "\x18Bells Signed Message:\n",
-    bech32: "bel",
-    bip32: { public: 0x0488b21e, private: 0x0488ade4 },
-    pubKeyHash: 0x19,
-    scriptHash: 0x1e,
-    wif: 0x99,
-  },
-  "bells-testnet": {
-    messagePrefix: "\x18Bells Signed Message:\n",
-    bech32: "tbel",
-    bip32: { public: 0x043587cf, private: 0x04358394 },
-    pubKeyHash: 0x7f,
-    scriptHash: 0xc4,
-    wif: 0xef,
-  },
+  "bells-mainnet": networks.bellcoin,
+  "bells-testnet": networks.testnet,
 };
 
 // -----------------------------------------------------------------------
@@ -371,19 +361,31 @@ async function main() {
   await waitForConfirmation(electrs, r1.revealTxid);
 
   // ---- Phase 2: second inscription that should naturally spend the inscription UTXO ----
-  logLine("\n[step 2] fetching UTXOs after step 1 (should include the 546-sat inscription UTXO)");
-  const utxos2 = await hydrateUtxos(electrs, await electrs.utxos(addr));
+  // Finding 2026-04-24: Nintondo electrs filters outputs below a dust
+  // threshold (at least the 1000-sat UTXO_MIN_VALUE) from /address/…/utxo.
+  // The reveal dust IS unspent on-chain but invisible to that endpoint.
+  // We construct the inscription UTXO manually from the reveal tx we just
+  // broadcast + inject it at the head of the pool. Greedy-smallest-first
+  // then picks it as the first input of commit_2 — the sat-spend-v1 path.
+  logLine("\n[step 2] fetching address UTXOs after step 1");
+  const utxos2Fetched = await hydrateUtxos(electrs, await electrs.utxos(addr));
+  const balance2Visible = utxos2Fetched.reduce((s, u) => s + u.value, 0);
+  logLine(`         ${utxos2Fetched.length} UTXO(s) visible via electrs, ${balance2Visible} sats`);
+
+  const inscriptionUtxo = {
+    txid: r1.revealTxid,
+    vout: 0,
+    value: UTXO_MIN_VALUE,
+    hex: r1.revealHex,
+  };
+  logLine(`         injecting inscription UTXO from reveal_1: `
+    + `${inscriptionUtxo.txid.slice(0, 16)}…:${inscriptionUtxo.vout} = ${inscriptionUtxo.value} sats`);
+
+  // Put inscription UTXO first so greedy-smallest-first picks it.
+  // (Greedy sorts internally; we prepend for clarity in logs.)
+  const utxos2 = [inscriptionUtxo, ...utxos2Fetched];
   const balance2 = utxos2.reduce((s, u) => s + u.value, 0);
-  const inscriptionUtxo = utxos2.find(
-    (u) => u.txid === r1.revealTxid && u.vout === 0,
-  );
-  logLine(`         ${utxos2.length} UTXO(s), ${balance2} sats total`);
-  logLine(`         smallest: ${Math.min(...utxos2.map((u) => u.value))} sats`);
-  if (!inscriptionUtxo) {
-    logLine(`[fatal] could not find the step-1 inscription UTXO (${r1.revealTxid}:0) in the wallet.`);
-    process.exit(4);
-  }
-  logLine(`         inscription UTXO found: ${inscriptionUtxo.txid.slice(0, 16)}…:${inscriptionUtxo.vout} = ${inscriptionUtxo.value} sats`);
+  logLine(`         combined pool: ${utxos2.length} UTXO(s), ${balance2} sats, smallest=${Math.min(...utxos2.map((u) => u.value))}`);
 
   const body2 = JSON.stringify({
     p: "pokebells",
