@@ -1,8 +1,8 @@
 # PokeBells Gen 2 Testnet Inscription Checklist
 
-Generated: 2026-04-24T08:29:12.343Z
+Generated: 2026-04-24T08:50:17.166Z
 Assets total: 529
-Tier 1 known bytes: 3332373 (≈ 3.18 MB)
+Tier 1 known bytes: 3334001 (≈ 3.18 MB)
 
 ## Workflow
 
@@ -38,7 +38,7 @@ Tier 1 known bytes: 3332373 (≈ 3.18 MB)
 
 502 PNGs — one entry per dex × {normal, shiny}. Full list in `inscription-checklist.testnet.json`.
 
-### 1d. ES modules (8, 439233 bytes)
+### 1d. ES modules (8, 440861 bytes)
 
 **Inscribe each as `.txt`** (the Inscriber rejects `.js`/`.mjs`).
 
@@ -51,16 +51,9 @@ Tier 1 known bytes: 3332373 (≈ 3.18 MB)
 | `wallet_adapter` | `wallet_adapter.txt` | 23440 | `c8f16cc540012cbc…` | `game/wallet-adapter.mjs` |
 | `signin_verify` | `signin_verify.txt` | 32220 | `4b8943e2585bc7de…` | `game/signin-verify.mjs` |
 | `pbrp_session_key` | `pbrp_session_key.txt` | 11052 | `3799a0d1a8f41cf7…` | `game/pbrp/session-key.mjs` |
-| `shell` | `shell.txt` | 180331 | `9fd94a7b76d0b56d…` | `game/shell.js` |
+| `shell` | `shell.txt` | 181959 | `cf4fd9acbfbdf7ff…` | `game/shell.js` |
 
 ## Tier 2 — Aggregate manifests (fill tier-1 ids first)
-
-### rom-manifest
-
-- Inscribe as: `pokecrystal-rom.json`
-- Source template: `game/manifest.pokebells-testnet-template.json`
-- Placeholder: `ROM_MANIFEST_INSCRIPTION_ID`
-- Note: After tier 1: open this JSON, replace every ROM_CHUNK_*/BINJGB_*_INSCRIPTION_ID with the real i0 strings, recompute bytes+sha256, then inscribe.
 
 ### sprite-pack-manifest
 
@@ -75,6 +68,13 @@ Tier 1 known bytes: 3332373 (≈ 3.18 MB)
 - Source template: `game/collection.template.json`
 - Placeholder: `COLLECTION_INSCRIPTION_ID`
 - Note: Write a fresh {"p":"pokebells-collection","v":1,"name":"PokeBells","slug":"pokebells",...} JSON and inscribe. See the main manifest for the exact schema consumers expect.
+
+### rom-manifest
+
+- Inscribe as: `pokecrystal-rom.json`
+- Source template: `game/manifest.pokebells-testnet-template.json`
+- Placeholder: `ROM_MANIFEST_INSCRIPTION_ID`
+- Note: After tier 1 + sprite-pack: fill every ROM_CHUNK_* + BINJGB_* + SPRITE_PACK_INSCRIPTION_ID, inscribe.
 
 ## Tier 3 — Main bootloader manifest
 

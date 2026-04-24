@@ -421,6 +421,14 @@ function inscribeLocal({
 // For pokebells_inscriber_chunks (array field in main-manifest), each
 // element is a separate placeholder string; they resolve independently.
 function fillTier2FromProgress(asset, checklist, progress) {
+  // Role-specific fillers for tier-2 assets whose template doesn't have
+  // unique placeholder strings (e.g. sprite-pack has 502 identical
+  // `REPLACE_ME_AFTER_INSCRIBE_i0` placeholders, disambiguated by dex
+  // number + "normal"/"shiny" key).
+  if (asset.role === "sprite-pack-manifest") {
+    return fillSpritePackManifest(asset, progress);
+  }
+
   const filePath = path.resolve(REPO_ROOT, asset.file);
   let text = fs.readFileSync(filePath, "utf8");
 
@@ -452,6 +460,40 @@ function fillTier2FromProgress(asset, checklist, progress) {
   }
 
   return { text, replaced, unresolved: Array.from(unresolvedSet) };
+}
+
+// Per-dex walker for sprite-pack.manifest.template.json. The template
+// shape is:
+//   { "p": "pokebells-sprites", "v": 1, "sprites": { "1": {...}, ... } }
+// where each species entry has normal_inscription_id + shiny_inscription_id
+// fields. We look up the two tier-1 entries for that dex
+// (sprite-normal:NNN-normal.png + sprite-shiny:NNN-shiny.png) in progress
+// and substitute the ids in-place.
+function fillSpritePackManifest(asset, progress) {
+  const filePath = path.resolve(REPO_ROOT, asset.file);
+  const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  if (!raw.sprites || typeof raw.sprites !== "object") {
+    return { text: "", replaced: 0, unresolved: ["sprite-pack template has no `sprites` object"] };
+  }
+
+  const missing = [];
+  let replaced = 0;
+  for (const [dex, entry] of Object.entries(raw.sprites)) {
+    const dexStr = String(dex).padStart(3, "0");
+    const normalKey = `sprite-normal:${dexStr}-normal.png`;
+    const shinyKey = `sprite-shiny:${dexStr}-shiny.png`;
+    const normal = progress.inscriptions[normalKey];
+    const shiny = progress.inscriptions[shinyKey];
+    if (normal?.inscription_id) { entry.normal_inscription_id = normal.inscription_id; replaced++; }
+    else missing.push(normalKey);
+    if (shiny?.inscription_id) { entry.shiny_inscription_id = shiny.inscription_id; replaced++; }
+    else missing.push(shinyKey);
+  }
+
+  // Serialize deterministically (2-space indent) so the sha256 is stable
+  // across runs of the same progress file.
+  const text = JSON.stringify(raw, null, 2) + "\n";
+  return { text, replaced, unresolved: missing.slice(0, 5) };
 }
 
 // ======================================================================
@@ -574,7 +616,12 @@ async function main() {
   //   main-manifest: fills module + chunks + rom + collection placeholders
   //   collection-metadata: template is static (no placeholders), inscribes
   //     as-is — included here so it's not incorrectly deferred.
-  const AUTO_FILL_ROLES = new Set(["rom-manifest", "main-manifest", "collection-metadata"]);
+  const AUTO_FILL_ROLES = new Set([
+    "rom-manifest",
+    "main-manifest",
+    "collection-metadata",
+    "sprite-pack-manifest",
+  ]);
 
   let tier2Deferred = 0;
   for (const asset of remaining) {

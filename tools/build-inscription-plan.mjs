@@ -183,19 +183,10 @@ async function main() {
   //   sprite-pack.manifest.template.json -> filled with sprite ids
   //   collection metadata JSON (p:pokebells-collection)
 
-  assets.push({
-    role: 'rom-manifest',
-    inscribeAs: 'pokecrystal-rom.json',
-    contentType: 'application/json',
-    file: 'game/manifest.pokebells-testnet-template.json',
-    // Filled after tier 1 — bytes + sha256 recomputed at inscribe time.
-    bytes: null,
-    sha256: null,
-    dependsOn: ['rom-chunk', 'runtime-js', 'runtime-wasm'],
-    placeholder: 'ROM_MANIFEST_INSCRIPTION_ID',
-    note: 'After tier 1: open this JSON, replace every ROM_CHUNK_*/BINJGB_*_INSCRIPTION_ID with the real i0 strings, recompute bytes+sha256, then inscribe.',
-  });
-
+  // sprite-pack-manifest must inscribe BEFORE rom-manifest — the
+  // rom-manifest template embeds SPRITE_PACK_INSCRIPTION_ID in its
+  // `sprite_pack.inscription_id` field, so the sprite-pack id must
+  // already be in progress.json when rom-manifest auto-fills.
   assets.push({
     role: 'sprite-pack-manifest',
     inscribeAs: 'sprite-pack.json',
@@ -218,6 +209,19 @@ async function main() {
     dependsOn: [],
     placeholder: 'COLLECTION_INSCRIPTION_ID',
     note: 'Write a fresh {"p":"pokebells-collection","v":1,"name":"PokeBells","slug":"pokebells",...} JSON and inscribe. See the main manifest for the exact schema consumers expect.',
+  });
+
+  assets.push({
+    role: 'rom-manifest',
+    inscribeAs: 'pokecrystal-rom.json',
+    contentType: 'application/json',
+    file: 'game/manifest.pokebells-testnet-template.json',
+    // Filled after tier 1 — bytes + sha256 recomputed at inscribe time.
+    bytes: null,
+    sha256: null,
+    dependsOn: ['rom-chunk', 'runtime-js', 'runtime-wasm', 'sprite-pack-manifest'],
+    placeholder: 'ROM_MANIFEST_INSCRIPTION_ID',
+    note: 'After tier 1 + sprite-pack: fill every ROM_CHUNK_* + BINJGB_* + SPRITE_PACK_INSCRIPTION_ID, inscribe.',
   });
 
   // ---- Tier 3: bootloader manifest ----

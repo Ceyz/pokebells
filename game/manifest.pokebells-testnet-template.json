@@ -117,5 +117,8 @@
         "inscriptionId": "ROM_CHUNK_008_INSCRIPTION_ID"
       }
     }
-  ]
+  ],
+  "sprite_pack": {
+    "inscription_id": "SPRITE_PACK_INSCRIPTION_ID"
+  }
 }

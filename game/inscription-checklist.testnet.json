@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-04-24T08:29:12.333Z",
+  "generatedAt": "2026-04-24T08:50:17.161Z",
   "network": "bells-testnet",
   "assetCount": 529,
-  "tier1KnownBytes": 3332373,
+  "tier1KnownBytes": 3334001,
   "notes": [
     "Inscribe in tier order (1 → 4). Inside tier 1 the order doesn't matter.",
     "Nintondo Inscriber rejects .js/.mjs uploads → inscribe ES modules as .txt.",
@@ -5734,8 +5734,8 @@
       "inscribeAs": "shell.txt",
       "contentType": "text/plain",
       "file": "game/shell.js",
-      "bytes": 180331,
-      "sha256": "9fd94a7b76d0b56d91a898fe56b49536554831f8c073b7b3208e287d4de78330",
+      "bytes": 181959,
+      "sha256": "cf4fd9acbfbdf7ffb6572d01acf988ec471ade45b97520cde88073d9f3dff9db",
       "dependsOn": [],
       "placeholder": "SHELL_INSCRIPTION_ID"
     },
@@ -5779,21 +5779,6 @@
       "placeholder": "POKEBELLS_INSCRIBER_CHUNK_2_INSCRIPTION_ID"
     },
     {
-      "role": "rom-manifest",
-      "inscribeAs": "pokecrystal-rom.json",
-      "contentType": "application/json",
-      "file": "game/manifest.pokebells-testnet-template.json",
-      "bytes": null,
-      "sha256": null,
-      "dependsOn": [
-        "rom-chunk",
-        "runtime-js",
-        "runtime-wasm"
-      ],
-      "placeholder": "ROM_MANIFEST_INSCRIPTION_ID",
-      "note": "After tier 1: open this JSON, replace every ROM_CHUNK_*/BINJGB_*_INSCRIPTION_ID with the real i0 strings, recompute bytes+sha256, then inscribe."
-    },
-    {
       "role": "sprite-pack-manifest",
       "inscribeAs": "sprite-pack.json",
       "contentType": "application/json",
@@ -5817,6 +5802,22 @@
       "dependsOn": [],
       "placeholder": "COLLECTION_INSCRIPTION_ID",
       "note": "Write a fresh {\"p\":\"pokebells-collection\",\"v\":1,\"name\":\"PokeBells\",\"slug\":\"pokebells\",...} JSON and inscribe. See the main manifest for the exact schema consumers expect."
+    },
+    {
+      "role": "rom-manifest",
+      "inscribeAs": "pokecrystal-rom.json",
+      "contentType": "application/json",
+      "file": "game/manifest.pokebells-testnet-template.json",
+      "bytes": null,
+      "sha256": null,
+      "dependsOn": [
+        "rom-chunk",
+        "runtime-js",
+        "runtime-wasm",
+        "sprite-pack-manifest"
+      ],
+      "placeholder": "ROM_MANIFEST_INSCRIPTION_ID",
+      "note": "After tier 1 + sprite-pack: fill every ROM_CHUNK_* + BINJGB_* + SPRITE_PACK_INSCRIPTION_ID, inscribe."
     },
     {
       "role": "main-manifest",
