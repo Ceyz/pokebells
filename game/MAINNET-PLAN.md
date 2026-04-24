@@ -50,34 +50,57 @@ requires another review round.
    (it is what `boot.js` `CONTENT_BASES` already targets); `/html/`
    works as a fallback. No Nintondo viewer chrome observed on either
    for HTML-typed inscriptions.
-3. **Origin safety — validated against the inscriptions tested on
-   2026-04-24; not universally proven.** We opened the PokeBells
-   testnet root (`e1c15e0b…`, full game) and a second HTML inscription
-   on the same content host (`0ea64bbd…` mini-test root). Wallet was
-   injected on the first and NOT on the second; `connect?.('bellsTestnet')`
-   returned `undefined` on the second (no method, extension never ran
-   there). So on the concrete cases we tried, the mainnet threat
-   model holds: a random inscription on the same host cannot silently
-   trigger `signPsbt` against an active PokeBells wallet session.
-   - **Injection criterion is opaque.** The Nintondo extension is
-     closed-source; it could be keying on any combination of URL
-     pattern, page bytes, favicon/meta tags, DOM shape, internal
-     allowlist, or a saved per-inscription permission. Without source
-     we can only observe.
-   - **Follow-up probe before mainnet (P0-light / P1)**:
-     **byte-identical clone injection**. Inscribe a carbon copy of
-     the current PokeBells root HTML at a DIFFERENT inscription id
-     and visit it. If `window.nintondo` injects there too, the
-     extension is keying on content (or some content-derived
-     signal), meaning a cloned attacker inscription could get
-     injected — still mitigated by visible popup on first signPsbt
-     + multi-tab lease lock, but worth characterising. If it does
-     NOT inject, the extension is keying on the specific inscription
-     id / URL, which is the strongest isolation we could hope for.
-     Not a mainnet blocker in either case (user must voluntarily
-     visit the clone URL; real harm requires signPsbt which still
-     prompts), but the answer changes how confidently we communicate
-     origin safety in the project docs.
+3. **Origin safety — resolved 2026-04-24 with clone-injection probe.
+   Nintondo extension keys on CONTENT (not per-inscription-id).**
+   Empirical result from `tools/probe-clone-injection.mjs`:
+   - Inscribed a byte-identical clone of the PokeBells testnet root
+     (`e1c15e0b…`) at a NEW inscription id:
+     `6c35d0f9a9c4caf3da5f96555fdbe51a053a8c7f81e8a0c0cc65e5883f4060c7i0`
+     (53 057 bytes, ~41k sats fee, block 665838).
+   - On the clone URL: `typeof window.nintondo === 'object'` AND
+     `getAccount()` returns the operator address **silently** — no
+     popup, same state as the real root.
+   - The earlier "no injection on `0ea64bbd…`" result is consistent:
+     the mini-test root has DIFFERENT bytes, so the content-based
+     criterion didn't match. Injection is not per-inscription-id.
+
+   **Mainnet threat vector (phishing flavor)**:
+   1. Attacker inscribes a byte-identical copy of the mainnet root
+      at a different inscription id.
+   2. Social-engineers a user to visit the clone URL.
+   3. User sees a UI that looks like PokeBells.
+   4. Clone JS calls `window.nintondo.signPsbt(badPsbt)` with outputs
+      to the attacker.
+   5. **The Nintondo signPsbt popup still opens**, showing the tx
+      details. An attentive user can reject; a distracted user clicks
+      Sign and loses funds.
+
+   **Technical mitigations already in place**:
+   - signPsbt popup is inalienable (Nintondo always requires explicit
+     confirmation on signature; cannot be bypassed by the page).
+   - Multi-tab writer lease (P0 #11) blocks a second PokeBells tab
+     (incl. a clone loaded as a second tab) from writing to the
+     shared IDB while the original is active.
+   - Our post-sign tx verification (P0 #6 post-sign half) does NOT
+     help here — the clone controls its own JS and would bypass our
+     `inscribePayloadOnChain` entirely, calling `signPsbt` directly
+     with any PSBT.
+
+   **Communication mitigations required before mainnet**:
+   - Publish the canonical root inscription id prominently (Twitter
+     profile, GitHub README, companion hub banner). Users should
+     verify the URL matches this id before connecting.
+   - Document the content-based injection finding so users know to
+     verify signPsbt tx details on every signature, not just blindly
+     approve.
+   - Consider asking Nintondo to offer a per-inscription-id
+     allowlist mode (would meaningfully tighten origin safety, but
+     that's their roadmap, not ours).
+
+   **Residual risk**: phishing + social engineering on signPsbt
+   content review — the standard Web3 wallet threat model. Not
+   unique to PokeBells; not a mainnet blocker; but needs honest
+   communication.
 4. **Storage scoping — CONFIRMED 2026-04-24.** Browser same-origin
    policy applies as expected: `localStorage` + IndexedDB
    (`pokebells-phase1@v4`) are SHARED across the two inscriptions on
