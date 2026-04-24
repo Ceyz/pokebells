@@ -222,7 +222,12 @@ async function main() {
 
   console.log('');
   console.log(`Summary: ${ok} ok, ${failed} failed, ${statements.length} total.`);
-  if (failed > 0) process.exit(1);
+  // --skip-errors means "tolerate idempotent re-run failures" (e.g.
+  // ALTER TABLE ADD COLUMN fails with 'duplicate column' on the second
+  // run, which is expected). In that mode, a final exit 0 signals
+  // "migration applied what it could". Without --skip-errors, any
+  // failure propagates exit 1 so CI catches drift.
+  if (failed > 0 && !args.skipErrors) process.exit(1);
 }
 
 await main().catch((error) => {
