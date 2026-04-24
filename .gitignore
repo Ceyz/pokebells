@@ -44,6 +44,9 @@ tools/*
 !tools/bulk-inscribe.test.mjs
 !tools/bulk-inscribe-collection.test.mjs
 !tools/phase-b-live-probe.mjs
+!tools/probe-clone-injection.mjs
+# Clone-injection probe log — origin-safety follow-up evidence.
+!tools/probe-clone-injection.log
 # Live probe log — kept in repo as evidence of the Phase B + C PASS.
 !tools/phase-b-live-probe.log
 !tools/gen-bells-wallet.mjs
