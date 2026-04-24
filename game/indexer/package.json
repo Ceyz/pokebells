@@ -8,7 +8,7 @@
     "check": "node --check src/worker.js && node --check src/validator.js && node --check src/db.js",
     "test": "node --test src/validator.test.js",
     "d1:create": "wrangler d1 create pokebells-indexer",
-    "d1:migrate": "node ../../tools/apply-d1-schema.mjs --db pokebells-indexer --file schema.sql --skip-errors"
+    "d1:migrate": "node ../../tools/apply-d1-schema.mjs --db pokebells-indexer --file game/indexer/schema.sql --skip-errors"
   },
   "devDependencies": {
     "wrangler": "^4.84.0"
