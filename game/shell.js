@@ -957,6 +957,11 @@ async function sha256HexOfBytes(bytes) {
 }
 
 async function writeStoredExtRamSnapshot(buffer, reason = 'manual') {
+  // Multi-tab read-only guard. Emulator auto-save is the original
+  // corruption vector — two tabs' emulators both writing to the same
+  // IDB saves key = last-write-wins garbage. The writer-lease holder
+  // is the only tab allowed to persist SRAM.
+  assertMultiTabWriter(state.multiTab);
   const db = await openDb();
   // Track a monotonic local_save_version + sha so the restore-from-chain
   // dialog can diff local vs chain. We read the previous row to carry its
@@ -994,6 +999,7 @@ async function writeStoredExtRamSnapshot(buffer, reason = 'manual') {
 // the restore dialog detect "local has diverged from chain" without the
 // user having to remember when they last synced.
 async function markLocalSaveSyncedWithChain({ chainVersion, chainInscriptionId, chainSha256 }) {
+  assertMultiTabWriter(state.multiTab);
   const db = await openDb();
   const prev = await dbGet(db, 'saves', getSaveKey());
   if (!prev) return;
@@ -1006,6 +1012,7 @@ async function markLocalSaveSyncedWithChain({ chainVersion, chainInscriptionId, 
 }
 
 async function backupStoredExtRamSnapshotIfMissing(buffer) {
+  assertMultiTabWriter(state.multiTab);
   const db = await openDb();
   const backupKey = getSaveKey('backup-before-pc-sync');
   const existing = await dbGet(db, 'saves', backupKey);
@@ -1023,6 +1030,7 @@ async function backupStoredExtRamSnapshotIfMissing(buffer) {
 }
 
 async function backupNamedExtRamSnapshot(buffer, suffix) {
+  assertMultiTabWriter(state.multiTab);
   const db = await openDb();
   await dbPut(db, 'saves', {
     key: getSaveKey(suffix),

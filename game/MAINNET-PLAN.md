@@ -68,11 +68,13 @@ requires another review round.
     lifetime. First tab = active writer (full UI); second tab =
     `isWriter=false` + read-only banner. Legacy BroadcastChannel
     warning-only banner kept as fallback for browsers without
-    `navigator.locks`. Write-side guards at `persistPendingCapture`
-    and `runDirectMintFlow` via `assertMultiTabWriter`. 4 tests in
-    `game/capture-core.test.mjs`. Save-snapshot writes in
-    `storeExtRamSnapshot` are NOT yet guarded — follow-up P1 item
-    to close the emulator auto-save corruption vector.
+    `navigator.locks`. Write-side guards at `persistPendingCapture`,
+    `runDirectMintFlow`, `writeStoredExtRamSnapshot`,
+    `markLocalSaveSyncedWithChain`, `backupStoredExtRamSnapshotIfMissing`,
+    and `backupNamedExtRamSnapshot` via `assertMultiTabWriter`.
+    Closes the emulator auto-save corruption vector (the original
+    "j'ai lancé deux onglets en meme temps" bug). 4 tests in
+    `game/capture-core.test.mjs`.
 
 ## P0 CI gate — keep green before release
 
@@ -127,13 +129,6 @@ Deferred:
 
 ## P1 — follow-ups from shipped P0
 
-- Guard save-snapshot IDB writes (`storeExtRamSnapshot`,
-  `markLocalSaveSyncedWithChain`, `backupStoredExtRamSnapshotIfMissing`,
-  `backupNamedExtRamSnapshot` in `game/shell.js`) with
-  `assertMultiTabWriter`. The current lease lock blocks mint flows and
-  pendingCaptures writes but the emulator can still auto-save to IDB
-  from a read-only tab, which is the original corruption vector the
-  user hit.
 - Post-sign PSBT decode (deferred half of P0 #6). Parse the signed
   PSBT to confirm outputs go only to the connected wallet + the
   inscription envelope; enforce the service-fee output is pinned to
