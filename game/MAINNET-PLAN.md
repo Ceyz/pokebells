@@ -31,16 +31,61 @@ requires another review round.
 
 ## P0 — live/integration (block mainnet until validated)
 
-1. **Content-host direct path.** Wallet connect, durable storage, catch,
-   direct mint, indexer sync, reload — end-to-end on a real testnet wallet.
-2. **Choose `/content/<id>` vs `/html/<id>` officially.** Decide the
-   canonical Play URL form after comparing wallet injection, storage
-   persistence, rendering stability.
-3. **Origin safety.** Another inscription on the same content host must
-   not be able to reuse the wallet permission or call sensitive methods
-   silently.
-4. **Storage scoping.** IDB / localStorage isolation across inscriptions
-   served by the same content host.
+1. **Content-host direct path — VALIDATED 2026-04-24** (testnet live
+   session, see `tools/TESTNET-LIVE-P0.md`). Root at
+   `bells-testnet-content.nintondo.io/content/e1c15e0bd5b4be8a76cb03c35ebdb96388ea2528242f2cb57db6ce0e454f4ea2i0`
+   injects `window.nintondo` (30 methods exposed),
+   `connect('bellsTestnet')` returns the account silently (origin
+   pre-approved from the 2026-04-24 mint session — normal wallet
+   behaviour), `getNetwork()` returns `bellsTestnet`, the full PokeBells
+   app loads (capture-core, gen2-species, shell, the whole module
+   chain visible in boot logs). Minor: WASM streaming compile
+   (`binjgb.wasm`) fails due to MIME `application/octet-stream`
+   instead of `application/wasm`; falls back to `ArrayBuffer`
+   instantiation, no functional impact. Nintondo ask: serve `.wasm`
+   with the proper MIME.
+2. **`/content/<id>` vs `/html/<id>` — RESOLVED 2026-04-24.**
+   Empirically both serve the same bytes + both trigger wallet
+   injection + both load the full PokeBells app. **Canonical: `/content/`**
+   (it is what `boot.js` `CONTENT_BASES` already targets); `/html/`
+   works as a fallback. No Nintondo viewer chrome observed on either
+   for HTML-typed inscriptions.
+3. **Origin safety — VALIDATED 2026-04-24 with one follow-up.**
+   Opened a second inscription id on the same content host
+   (`0ea64bbd…` mini-test root, HTML). Result: `window.nintondo`
+   is NOT auto-injected on that inscription despite being on the
+   same host. `connect?.('bellsTestnet')` returns `undefined` (the
+   method doesn't exist because the extension never ran on that
+   page). Confirms the mainnet threat model: wallet permission is
+   per-inscription (or per-some-other-extension-criterion), not
+   per-host. A random inscription cannot silently trigger signPsbt
+   on an active PokeBells wallet session.
+   - **Follow-up (not a P0 blocker)**: the exact injection criterion
+     is opaque — favicon / meta-tag / content hash / internal
+     allowlist (Nintondo extension source not available). Before
+     mainnet we should test whether a byte-identical copy of the
+     PokeBells root on a different inscription id also triggers
+     injection (if yes: user visiting a cloned attacker inscription
+     could get auto-connected; mitigation is visible
+     wallet confirmation UI + multi-tab lock).
+4. **Storage scoping — CONFIRMED 2026-04-24.** Browser same-origin
+   policy applies as expected: `localStorage` + IndexedDB
+   (`pokebells-phase1@v4`) are SHARED across the two inscriptions on
+   the same `bells-testnet-content.nintondo.io` origin. The secondary
+   tab read the primary tab's localStorage marker verbatim and saw
+   the same IDB database. This is why the design already treats
+   `localStorage` as a validated cache, never an authoritative
+   source (see [ROOT-APP-DESIGN.md](ROOT-APP-DESIGN.md) "Discovery"
+   section). Wallet privkey stays inside the Nintondo extension,
+   not in our storage, so the leak surface is limited to non-secret
+   application state (pendingCaptures rows, cached save SRAM).
+   Multi-tab writer lease (shipped in P0 #11) plus the fact that the
+   user would need to voluntarily visit a hostile inscription next
+   to PokeBells make this a manageable attack surface.
+
+**Bonus observation**: the `BroadcastChannel` multi-tab warning
+banner triggered correctly live on testnet when the operator opened
+a second PokeBells tab. Lease lock mechanics validated end-to-end.
 5. **Client mint guard.** Direct and manual mint flows refuse to sign
    the PSBT if the sprite resolver is absent or `mint.image` is non-
    canonical. Prevents the `image:null` orphan mints (3 lost on
